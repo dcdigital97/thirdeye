@@ -12,6 +12,7 @@
   A dark, tactical 3D globe (CesiumJS) that renders genuinely-live, key-free
   public feeds, each labelled with its evidence class:
      SPACE       satellites   CelesTrak TLE + satellite.js  (SGP4 model output)
+                 constellatns Starlink / GNSS / geo belt    (SGP4 model output)
                  launches     Launch Library 2              (official schedule)
                  auroral oval NOAA SWPC OVATION             (model now-cast)
                  fireballs    NASA JPL CNEOS                (official, US Gov sensors)
@@ -22,7 +23,9 @@
                  precip radar RainViewer composite          (observed raster)
                  UK floods    Environment Agency RT          (official flood warning)
      AIR         military ac  airplanes.live /v2/mil        (direct ADS-B observation)
+                 airport wx   NOAA AWC METAR                (official station obs)
      SIGNALS     GPS interfer GPSJam (ADS-B derived)         (inferred, daily aggregate)
+     INFRASTR.   subsea cables TeleGeography                 (reference geometry)
 
   Every feed has a matching entry in the in-app SOURCES registry (licence, rate
   limits, auth, CORS) and in docs/sources.md — the brief's three-part "done" bar.
@@ -418,7 +421,13 @@ var FEEDS = {
   // NASA JPL CNEOS fireball reports — CORS-open, proxied for safety
   fireball:{ proxy:'/feeds/jpl/fireball?limit=200&sort=-date', direct:'https://ssd-api.jpl.nasa.gov/fireball.api?limit=200&sort=-date' },
   // GPSJam daily GPS-interference CSV (per day, per H3-res-4 cell) — proxied when hosted
-  gpsjam: function(date){ return { proxy:'/feeds/gpsjam/'+date+'-h3_4.csv', direct:'https://gpsjam.org/data/'+date+'-h3_4.csv' }; }
+  gpsjam: function(date){ return { proxy:'/feeds/gpsjam/'+date+'-h3_4.csv', direct:'https://gpsjam.org/data/'+date+'-h3_4.csv' }; },
+  // Submarine cables (TeleGeography) — proxied when hosted; GeoJSON lines + landing points
+  cables:  { proxy:'/feeds/cables/cable/cable-geo.json', direct:'https://www.submarinecablemap.com/api/v3/cable/cable-geo.json' },
+  landings:{ proxy:'/feeds/cables/landing-point/landing-point-geo.json', direct:'https://www.submarinecablemap.com/api/v3/landing-point/landing-point-geo.json' },
+  cableInfo: function(id){ return { proxy:'/feeds/cables/cable/'+id+'.json', direct:'https://www.submarinecablemap.com/api/v3/cable/'+id+'.json' }; },
+  // Aviation Weather Center METAR (Europe/N-Atlantic bbox) — proxied when hosted
+  metar:   { proxy:'/feeds/metar?format=json&bbox=35,-30,72,45', direct:'https://aviationweather.gov/api/data/metar?format=json&bbox=35,-30,72,45' }
 };
 
 /* ---------- source registry (licence · rate · auth · CORS · evidence) ----------
@@ -462,7 +471,13 @@ var SOURCES = {
   gpsjam:        { name:'GPSJam GPS interference', org:'GPSJam (J. Wiseman) · data © adsbexchange.com', url:'https://gpsjam.org',
                    licence:'Attribution; underlying data © adsbexchange.com', rate:'Daily aggregate (one CSV per day)', auth:'none',
                    cors:'no CORS headers → proxied when hosted; needs h3-js to draw hexes',
-                   evidence:'INFERRED (aggregated ADS-B navigation-integrity)' }
+                   evidence:'INFERRED (aggregated ADS-B navigation-integrity)' },
+  cables:        { name:'Submarine cable map', org:'TeleGeography', url:'https://www.submarinecablemap.com',
+                   licence:'Free for reference; © TeleGeography', rate:'Reference geometry (updated periodically)', auth:'none',
+                   cors:'proxied when hosted', evidence:'REFERENCE (infrastructure geometry)' },
+  awc_metar:     { name:'Aviation Weather Center METAR', org:'NOAA / NWS Aviation Weather Center', url:'https://aviationweather.gov',
+                   licence:'U.S. Government public domain', rate:'METARs hourly (SPECIs ad hoc)', auth:'none',
+                   cors:'proxied when hosted', evidence:'OFFICIAL REPORT (station observation)' }
 };
 function fetchFeed(spec){
   var order = HOSTED ? [spec.proxy, spec.direct] : [spec.direct, spec.proxy];
@@ -642,12 +657,32 @@ var LAYERS = {
   gpsjam:{ id:'gpsjam', group:'SIGNALS', name:'GPS interference', sym:'⚑', color:'#F2A900',
            on:true, opacity:1, count:0, status:'idle', srcKey:'gpsjam', type:'poly',
            evidence:'INFERRED', source:'GPSJam · daily GPS interference (ADS-B derived)',
-           attr:'GPSJam · data © adsbexchange.com' }
+           attr:'GPSJam · data © adsbexchange.com' },
+  starlink:{ id:'starlink', group:'SPACE', name:'Starlink', sym:'·', color:'#E8EEF4',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'celestrak',
+           evidence:'MODEL OUTPUT', source:'CelesTrak (starlink) · propagated with SGP4',
+           attr:'CelesTrak · satellite.js' },
+  gnss:  { id:'gnss', group:'SPACE', name:'GNSS constellations', sym:'◇', color:'#9B8CFF',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'celestrak',
+           evidence:'MODEL OUTPUT', source:'CelesTrak (GPS/GLONASS/Galileo/BeiDou) · SGP4',
+           attr:'CelesTrak · satellite.js' },
+  geo:   { id:'geo', group:'SPACE', name:'Geostationary belt', sym:'◇', color:'#F2A900',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'celestrak',
+           evidence:'MODEL OUTPUT', source:'CelesTrak (geo) · propagated with SGP4',
+           attr:'CelesTrak · satellite.js' },
+  metar: { id:'metar', group:'AIR', name:'Airport weather (METAR)', sym:'☁', color:'#37E0A0',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'awc_metar',
+           evidence:'OFFICIAL REPORT', source:'NOAA AWC · METAR (Europe/N-Atlantic)',
+           attr:'NOAA Aviation Weather Center' },
+  cables:{ id:'cables', group:'INFRASTRUCTURE', name:'Submarine cables', sym:'⌇', color:'#39C6E6',
+           on:false, opacity:0.9, count:0, status:'idle', srcKey:'cables', type:'net',
+           evidence:'REFERENCE', source:'TeleGeography · submarine cable map',
+           attr:'TeleGeography · submarinecablemap.com' }
 };
 // link existing layers to their source-registry entries
 LAYERS.sat.srcKey='celestrak'; LAYERS.quake.srcKey='usgs_quakes';
 LAYERS.air.srcKey='airplanes_live'; LAYERS.hazard.srcKey='eonet'; LAYERS.launch.srcKey='ll2';
-var GROUPS = ['SPACE','ENVIRONMENT','AIR','SIGNALS'];
+var GROUPS = ['SPACE','ENVIRONMENT','AIR','SIGNALS','INFRASTRUCTURE'];
 var soloLayer = null;
 var GODMODE = false; // §3.5-E panoptic view: labels on aircraft (callsign+alt) and satellites (name)
 
@@ -768,10 +803,17 @@ function initViewer(){
   DS.floods=new Cesium.CustomDataSource('floods');
   DS.fireball=new Cesium.CustomDataSource('fireball'); DS.fireball.show=false;
   DS.gpsjam=new Cesium.CustomDataSource('gpsjam');
+  DS.starlink=new Cesium.CustomDataSource('starlink'); DS.starlink.show=false;
+  DS.gnss=new Cesium.CustomDataSource('gnss'); DS.gnss.show=false;
+  DS.geo=new Cesium.CustomDataSource('geo'); DS.geo.show=false;
+  DS.metar=new Cesium.CustomDataSource('metar'); DS.metar.show=false;
+  DS.cables=new Cesium.CustomDataSource('cables'); DS.cables.show=false;
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
   viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch); viewer.dataSources.add(DS.aurora);
   viewer.dataSources.add(DS.cyclone); viewer.dataSources.add(DS.gdacs);
   viewer.dataSources.add(DS.floods); viewer.dataSources.add(DS.fireball); viewer.dataSources.add(DS.gpsjam);
+  viewer.dataSources.add(DS.starlink); viewer.dataSources.add(DS.gnss); viewer.dataSources.add(DS.geo);
+  viewer.dataSources.add(DS.metar); viewer.dataSources.add(DS.cables);
 }
 
 /* switch basemap (silent=true lets the auto-fallback re-enter without a guard) */
@@ -873,6 +915,83 @@ function embeddedSatFallback(){
   buildSatEntities();
   LAYERS.sat.count=satRecords.length; LAYERS.sat.status='degraded';
   updateSatPositions(); refreshHealth(); renderLayers();
+}
+
+/* =====================================================================
+   LAYERS: satellite constellations (Starlink / GNSS / geostationary)
+   The same CelesTrak TLE + SGP4 engine as the `sat` layer, generalised to
+   named sets. Each set is drawn as lightweight points and is LAZY-loaded on
+   first enable; only ENABLED sets are propagated each tick (so the heavy
+   Starlink set costs nothing until you switch it on).
+   ===================================================================== */
+var CONSTELL = {
+  starlink:{ groups:['starlink'], cap:1500 },
+  gnss:    { groups:['gps-ops','glo-ops','galileo','beidou'], cap:null },
+  geo:     { groups:['geo'], cap:null }
+};
+var constRecords = { starlink:[], gnss:[], geo:[] };
+function loadConstellation(key){
+  if(typeof satellite==='undefined'){ LAYERS[key].status='unavailable'; refreshHealth(); renderLayers(); return; }
+  var cfg=CONSTELL[key]; LAYERS[key].status='loading'; refreshHealth(); renderLayers();
+  Promise.all(cfg.groups.map(function(g){
+    return fetchFeed(FEEDS.tle(g)).then(function(r){return r.text();}).catch(function(){return '';});
+  })).then(function(texts){
+    var recs=[], seen={};
+    texts.forEach(function(txt){
+      var lines=txt.split(/\r?\n/).filter(function(l){return l.trim().length;});
+      for(var i=0;i+2<lines.length;i+=3){
+        var name=lines[i].trim(), l1=lines[i+1], l2=lines[i+2];
+        if(l1[0]!=='1'||l2[0]!=='2'){ i-=2; continue; }
+        var norad=l1.substring(2,7).trim(); if(seen[norad]) continue; seen[norad]=1;
+        try{ var rec=satellite.twoline2satrec(l1,l2);
+          var epochAge=(Date.now()/86400000+2440587.5)-rec.jdsatepoch;
+          recs.push({name:name,norad:norad,satrec:rec,epochAge:epochAge,entity:null});
+        }catch(e){}
+      }
+    });
+    if(cfg.cap && recs.length>cfg.cap){ // even subsample big constellations (honestly flagged)
+      var step=recs.length/cfg.cap, out=[]; for(var x=0;x<recs.length;x+=step) out.push(recs[Math.floor(x)]);
+      recs=out; LAYERS[key]._sampled=true;
+    } else LAYERS[key]._sampled=false;
+    constRecords[key]=recs; buildConstEntities(key);
+    LAYERS[key].count=recs.length; LAYERS[key].status = recs.length?'live':'unavailable';
+    updateConstPositions(key); refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS[key].status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function buildConstEntities(key){
+  var col=LAYERS[key].color, ds=DS[key]; ds.entities.removeAll();
+  var sz = key==='geo'?4:(key==='starlink'?2.5:3);
+  constRecords[key].forEach(function(s){
+    s.entity=ds.entities.add({
+      position:Cesium.Cartesian3.fromDegrees(0,0,700000),
+      // depth-tested (no disableDepthTestDistance) so far-side objects hide behind the globe
+      point:{ pixelSize:sz, color:Cesium.Color.fromCssColorString(col).withAlpha(0.9) },
+      properties:{ te_layer:key, te:s }
+    });
+    s.entity._baseColor=col;
+  });
+}
+function updateConstPositions(key){
+  var recs=constRecords[key]; if(!recs.length) return;
+  var now=new Date(), gmst=satellite.gstime(now);
+  for(var i=0;i<recs.length;i++){ var s=recs[i]; if(!s.entity) continue;
+    try{
+      var pv=satellite.propagate(s.satrec,now); if(!pv.position){ s.entity.show=false; continue; }
+      var geo=satellite.eciToGeodetic(pv.position,gmst);
+      var lon=satellite.degreesLong(geo.longitude), lat=satellite.degreesLat(geo.latitude);
+      s.lastGeo={lon:lon,lat:lat,alt:geo.height};
+      s.lastVel=pv.velocity?Math.sqrt(pv.velocity.x*pv.velocity.x+pv.velocity.y*pv.velocity.y+pv.velocity.z*pv.velocity.z):null;
+      s.entity.position=Cesium.Cartesian3.fromDegrees(lon,lat,geo.height*1000);
+      if(s.entity.show===false) s.entity.show=true;
+    }catch(e){ s.entity.show=false; }
+  }
+}
+// master 1 Hz updater: the base sat layer + any ENABLED constellation
+function updateAllSats(){
+  updateSatPositions();
+  var keys=Object.keys(CONSTELL);
+  for(var i=0;i<keys.length;i++){ var k=keys[i];
+    if(LAYERS[k].on && !(soloLayer&&soloLayer!==k)) updateConstPositions(k); }
 }
 
 /* =====================================================================
@@ -1077,9 +1196,12 @@ function plotGeoJSON(ds, gj, layerKey, styleFn){
     var lon=cen[0], lat=cen[1]; if(!isFinite(lon)||!isFinite(lat)) return;
     var style=styleFn(f.properties||{}, f); if(!style) return;
     var e=ds.entities.add({
-      position:Cesium.Cartesian3.fromDegrees(lon,lat),
+      // lifted ~12 km and DEPTH-TESTED (disableDepthTestDistance:0) so markers on the far
+      // side of the globe are hidden behind it — they read as anchored to their location
+      // instead of floating over the disc and swimming as the camera rotates.
+      position:Cesium.Cartesian3.fromDegrees(lon,lat,12000),
       billboard:{ image:style.icon, width:style.size||18, height:style.size||18,
-        color:Cesium.Color.WHITE, disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        color:Cesium.Color.WHITE, disableDepthTestDistance:0 },
       properties:{ te_layer:layerKey, te:{ props:f.properties||{}, lon:lon, lat:lat } }
     });
     e._baseColor=style.color||'#F2A900'; n++;
@@ -1454,6 +1576,136 @@ function intelGPS(t){
 }
 
 /* =====================================================================
+   LAYER: submarine cables (TeleGeography) — Infrastructure
+   Cable routes as polylines (per-cable colour) + landing points as markers.
+   ===================================================================== */
+function loadCables(){
+  LAYERS.cables.status='loading'; refreshHealth(); renderLayers();
+  Promise.all([
+    fetchFeed(FEEDS.cables).then(function(r){return r.json();}).catch(function(){return null;}),
+    fetchFeed(FEEDS.landings).then(function(r){return r.json();}).catch(function(){return null;})
+  ]).then(function(res){
+    var cg=res[0], lp=res[1];
+    if(!cg && !lp){ LAYERS.cables.status='unavailable'; refreshHealth(); renderLayers(); return; }
+    DS.cables.entities.removeAll();
+    var lines=0, pts=0;
+    if(cg && cg.features){
+      cg.features.forEach(function(f){
+        var p=f.properties||{}, col=p.color||'#39C6E6', name=p.name||'', id=p.id||'';
+        var g=f.geometry; if(!g) return;
+        var parts = g.type==='MultiLineString'? g.coordinates : (g.type==='LineString'? [g.coordinates] : []);
+        parts.forEach(function(seg){
+          if(!seg||seg.length<2) return;
+          var pos=[];
+          for(var k=0;k<seg.length;k++){ var c=seg[k]; if(isFinite(c[0])&&isFinite(c[1])) pos.push(Cesium.Cartesian3.fromDegrees(c[0],c[1])); }
+          if(pos.length<2) return;
+          var e=DS.cables.entities.add({
+            polyline:{ positions:pos, width:1.6, arcType:Cesium.ArcType.GEODESIC,
+              material:Cesium.Color.fromCssColorString(col).withAlpha(0.75) },
+            properties:{ te_layer:'cables', te:{ type:'cable', id:id, name:name, color:col } }
+          });
+          e._baseColor=col; lines++;
+        });
+      });
+    }
+    if(lp && lp.features){
+      lp.features.forEach(function(f){
+        var g=f.geometry; if(!g||g.type!=='Point') return;
+        var c=g.coordinates; if(!isFinite(c[0])||!isFinite(c[1])) return;
+        var p=f.properties||{};
+        var e=DS.cables.entities.add({
+          position:Cesium.Cartesian3.fromDegrees(c[0],c[1]),
+          point:{ pixelSize:4, color:Cesium.Color.fromCssColorString('#CFE6FF').withAlpha(0.85),
+            outlineColor:Cesium.Color.fromCssColorString('#0A0E14').withAlpha(0.6), outlineWidth:1,
+            disableDepthTestDistance:Number.POSITIVE_INFINITY },
+          properties:{ te_layer:'cables', te:{ type:'landing', id:p.id||'', name:p.name||'', lon:c[0], lat:c[1] } }
+        });
+        e._baseColor='#CFE6FF'; pts++;
+      });
+    }
+    LAYERS.cables.count=lines; LAYERS.cables._landings=pts; LAYERS.cables.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.cables.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelCables(t){
+  if(t.type==='landing'){
+    $('#intelType').textContent='INFRASTRUCTURE · CABLE LANDING';
+    var h='<h2>'+esc(t.name||'Landing point')+'</h2><div class="subttl">submarine cable landing station</div>';
+    h+='<div class="badges">'+badgeC('#39C6E6','REFERENCE · TELEGEOGRAPHY')+'</div>';
+    h+=sect('Position')+kv([['LATITUDE',t.lat.toFixed(3)+'°'],['LONGITUDE',t.lon.toFixed(3)+'°']]);
+    h+='<div class="why"><b>Why you\'re seeing this</b>A shore point where submarine cables come ashore — frequently a chokepoint of interest. Reference geometry from TeleGeography.</div>';
+    h+='<div class="srcline">Source: <a href="https://www.submarinecablemap.com/landing-point/'+esc(t.id)+'" target="_blank" rel="noopener">submarinecablemap.com ↗</a></div>';
+    $('#intelBody').innerHTML=h; return;
+  }
+  $('#intelType').textContent='INFRASTRUCTURE · SUBMARINE CABLE';
+  var html='<h2>'+esc(t.name||'Submarine cable')+'</h2><div class="subttl" id="cabSub">loading details…</div>';
+  html+='<div class="badges">'+badgeC('#39C6E6','REFERENCE · TELEGEOGRAPHY')+badgeC(t.color||'#39C6E6','CABLE')+'</div>';
+  html+='<div id="cabBody"></div>';
+  html+='<div class="why"><b>Why you\'re seeing this</b>A submarine communications cable — the physical backbone carrying internet traffic between regions. Cuts, faults or taps on these are significant OSINT events.</div>';
+  html+='<div class="srcline">Source: <a href="https://www.submarinecablemap.com/submarine-cable/'+esc(t.id)+'" target="_blank" rel="noopener">submarinecablemap.com ↗</a></div>';
+  $('#intelBody').innerHTML=html;
+  // lazy-enrich with the per-cable detail file (owners / length / ready-for-service year)
+  if(t.id){ fetchFeed(FEEDS.cableInfo(t.id)).then(function(r){return r.json();}).then(function(d){
+    var rfs=d.rfs||d.rfs_year||'', len=d.length||'', owners=d.owners||'';
+    var sub=$('#cabSub'); if(sub) sub.textContent=[len?('length '+len):'', rfs?('RFS '+rfs):''].filter(Boolean).join(' · ')||(t.id);
+    var rows=[]; if(len) rows.push(['LENGTH',len]); if(rfs) rows.push(['READY (RFS)',rfs]);
+    if(owners) rows.push(['OWNERS', esc(String(owners)).slice(0,160)]);
+    var body=$('#cabBody'); if(body&&rows.length) body.innerHTML=sect('Cable')+kv(rows);
+  }).catch(function(){ var sub=$('#cabSub'); if(sub) sub.textContent=t.id||''; }); }
+  else { var sub=$('#cabSub'); if(sub) sub.textContent=''; }
+}
+
+/* =====================================================================
+   LAYER: airport weather METAR (NOAA Aviation Weather Center) — Air
+   ===================================================================== */
+function fltColor(cat){ return cat==='LIFR'?'#E06AFF':cat==='IFR'?'#FF5964':cat==='MVFR'?'#39C6E6':cat==='VFR'?'#37E0A0':'#7C8794'; }
+function loadMETAR(){
+  LAYERS.metar.status='loading'; refreshHealth(); renderLayers();
+  fetchFeed(FEEDS.metar).then(function(r){return r.json();}).then(function(arr){
+    DS.metar.entities.removeAll();
+    if(!Array.isArray(arr)) arr=[];
+    var n=0;
+    arr.forEach(function(m){
+      var lat=num(m.lat), lon=num(m.lon); if(lat==null||lon==null) return;
+      var col=fltColor(m.fltCat);
+      var e=DS.metar.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(lon,lat),
+        point:{ pixelSize:6, color:Cesium.Color.fromCssColorString(col).withAlpha(0.92),
+          outlineColor:Cesium.Color.fromCssColorString(col).withAlpha(0.35), outlineWidth:1,
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'metar', te:{ m:m, col:col } }
+      });
+      e._baseColor=col; n++;
+    });
+    LAYERS.metar.count=n; LAYERS.metar.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.metar.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelMETAR(t){
+  var m=t.m; $('#intelType').textContent='AIR · AIRPORT WEATHER';
+  var obs=(m.obsTime!=null&&isFinite(+m.obsTime))?new Date((+m.obsTime)*1000):null;
+  var age=obs?((Date.now()-obs.getTime())/1000):null;
+  var wind=(m.wdir==null?'—':(m.wdir==='VRB'?'VRB':m.wdir+'°'))+' @ '+(m.wspd!=null?m.wspd+' kt':'—')+(m.wgst?(' G'+m.wgst):'');
+  var html='<h2>'+esc(m.icaoId||'METAR')+'</h2><div class="subttl">'+esc(m.name||'')+'</div>';
+  html+='<div class="badges">'+badgeC('#9B8CFF','OFFICIAL · NOAA AWC')+badgeC(t.col,esc(m.fltCat||'—'))+
+        (age!=null?freshBadge(age<7200?'live':'stale','OBS '+fmtAge(age)+' AGO'):'')+'</div>';
+  html+=sect('Conditions')+kv([
+    ['FLIGHT CAT', m.fltCat||'—', (m.fltCat==='IFR'||m.fltCat==='LIFR')?'hot':''],
+    ['WIND', wind],
+    ['VISIBILITY', m.visib!=null?(m.visib+' sm'):'—'],
+    ['TEMP / DEW', (m.temp!=null?m.temp+'°C':'—')+' / '+(m.dewp!=null?m.dewp+'°C':'—')],
+    ['ALTIMETER', m.altim!=null?(Math.round(m.altim)+' hPa'):'—']]);
+  if(m.clouds && m.clouds.length){
+    var cl=m.clouds.map(function(c){ return (c.cover||'')+(c.base!=null?(' '+c.base+'ft'):''); }).join(', ');
+    html+=sect('Sky')+kv([['CLOUDS', esc(cl)]]);
+  }
+  if(m.rawOb){ html+=sect('Raw ob')+'<div class="kv"><div class="v mono" style="grid-column:1/3;white-space:normal;line-height:1.5">'+esc(m.rawOb)+'</div></div>'; }
+  html+='<div class="why"><b>Why you\'re seeing this</b>A METAR — the standard airport weather observation. The dot colour is the flight category: green VFR, cyan MVFR, red IFR, magenta LIFR (worsening). Official NWS Aviation Weather Center data; most stations report hourly.</div>';
+  html+='<div class="srcline">Source: NOAA Aviation Weather Center</div>';
+  $('#intelBody').innerHTML=html;
+}
+
+/* =====================================================================
    LAYER: military aircraft (airplanes.live /v2/mil, ADS-B v2 format)
    ===================================================================== */
 var SIM_ON=false;
@@ -1582,7 +1834,7 @@ function renderLayers(){
       var nm=el('div','nm'); nm.appendChild(document.createTextNode(l.name));
       if(l.id==='air'){ var mb=el('span','chip'); mb.textContent='MIL'; mb.style.color='#F2A900'; mb.style.borderColor='rgba(242,169,0,.4)'; mb.style.fontSize='8px'; mb.style.padding='1px 4px'; nm.appendChild(mb); }
       meta.appendChild(nm);
-      var sub=el('div','sub'); sub.textContent=statusText(l)+(l.count?(' · '+l.count):'');
+      var sub=el('div','sub'); sub.textContent=statusText(l)+(l.count?(' · '+l.count):'')+(l._sampled?' (sampled)':'')+(l.id==='cables'&&l._landings?(' · '+l._landings+' landings'):'');
       if(l.status==='unavailable') sub.style.color='#FF5964'; if(l.status==='sim') sub.style.color='#F2A900';
       meta.appendChild(sub); row.appendChild(meta);
       var tools=el('div','tools');
@@ -1602,13 +1854,20 @@ function renderLayers(){
   // persistent source attribution (licensing — brief §12)
   var foot=el('div'); foot.style.cssText='padding:9px 11px;border-top:1px solid var(--line);margin-top:4px;'+
     'font-size:9px;color:var(--txt-mute);line-height:1.7;font-family:var(--mono);letter-spacing:.04em';
-  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC<br>NOAA NHC · GDACS · RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange)';
+  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC · NOAA NHC<br>GDACS · RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange) · TeleGeography · NOAA AWC';
   body.appendChild(foot);
   $('#layChip').textContent=active+' ACTIVE';
 }
+/* lazy loaders: heavy/optional layers fetch only on first enable (any path) */
+var LAZY = {
+  starlink:function(){ loadConstellation('starlink'); }, gnss:function(){ loadConstellation('gnss'); },
+  geo:function(){ loadConstellation('geo'); }, metar:loadMETAR, cables:loadCables
+};
+var lazyLoaded = {};
 function applyVisibility(){
   Object.keys(LAYERS).forEach(function(k){
     var l=LAYERS[k], show=l.on && !(soloLayer&&soloLayer!==l.id);
+    if(show && LAZY[k] && !lazyLoaded[k]){ lazyLoaded[k]=true; LAZY[k](); } // fetch on first reveal
     if(k==='radar'){ if(radarLayer) radarLayer.show=show; return; } // raster overlay, not a datasource
     if(DS[k]) DS[k].show=show;
   });
@@ -1623,6 +1882,7 @@ function setLayerOpacity(id,val){
       e.point.outlineColor=Cesium.Color.fromCssColorString(base).withAlpha(0.35*val); }
     if(e.polygon){ e.polygon.material=Cesium.Color.fromCssColorString(base).withAlpha(0.32*val);
       e.polygon.outlineColor=Cesium.Color.fromCssColorString(base).withAlpha(0.85*val); }
+    if(e.polyline){ e.polyline.material=Cesium.Color.fromCssColorString(base).withAlpha(0.75*val); }
   });
 }
 
@@ -1670,9 +1930,15 @@ function selectEntity(e){
     e.polygon.outlineColor=Cesium.Color.fromCssColorString('#F2A900');
     selectedRestore=function(){ e.polygon.material=Cesium.Color.fromCssColorString(pb).withAlpha(0.32);
       e.polygon.outlineColor=Cesium.Color.fromCssColorString(pb).withAlpha(0.85); };
+  } else if(e.polyline){ var lb=e._baseColor||'#39C6E6';
+    var ow=(e.polyline.width&&e.polyline.width.getValue)?e.polyline.width.getValue(viewer.clock.currentTime):e.polyline.width;
+    e.polyline.material=Cesium.Color.fromCssColorString('#F2A900').withAlpha(0.95); e.polyline.width=Math.max(3,(ow||1.6)*2);
+    selectedRestore=function(){ e.polyline.material=Cesium.Color.fromCssColorString(lb).withAlpha(0.75); e.polyline.width=ow; };
   }
-  if(layer==='sat'){ intelSat(te); }
+  if(layer==='sat'||layer==='starlink'||layer==='gnss'||layer==='geo'){ intelSat(te); }
   else if(layer==='quake'){ intelQuake(te); }
+  else if(layer==='cables'){ intelCables(te); }
+  else if(layer==='metar'){ intelMETAR(te); }
   else if(layer==='hazard'){ intelHazard(te); }
   else if(layer==='launch'){ intelLaunch(te); }
   else if(layer==='aurora'){ intelAurora(te); }
@@ -1875,6 +2141,9 @@ function buildPaletteResults(q){
   if(q.length>=2){
     satRecords.forEach(function(s){ if(s.name.toLowerCase().indexOf(q)>=0||s.norad.indexOf(q)>=0){
       out.push({ic:'◆',t:'Sat '+s.name+' ('+s.norad+')',k:'SPACE',run:function(){ flyToEntity(s.entity); }}); } });
+    Object.keys(constRecords).forEach(function(ck){ constRecords[ck].forEach(function(s){
+      if(s.entity && (s.name.toLowerCase().indexOf(q)>=0||s.norad.indexOf(q)>=0)){
+        out.push({ic:'◇',t:s.name+' ('+s.norad+')',k:ck.toUpperCase(),run:function(){ flyToEntity(s.entity); }}); } }); });
     DS.air.entities.values.forEach(function(e){ var a=e.properties.te.getValue().a;
       var hay=((a.flight||'')+' '+(a.hex||'')+' '+(a.r||'')).toLowerCase();
       if(hay.indexOf(q)>=0) out.push({ic:'▲',t:'Air '+((a.flight||'').trim()||a.hex),k:'AIR',run:function(){ flyToEntity(e); }}); });
@@ -1952,7 +2221,7 @@ loadCesium().then(function(){
   loadFireballs();
   loadGPSJam();
   // refresh loops (respect upstream rate limits)
-  setInterval(updateSatPositions,1000);
+  setInterval(updateAllSats,1000);                                 // base sats + any enabled constellation, 1 Hz
   setInterval(function(){ if(!SIM_ON) loadAircraft(); },20000);   // airplanes.live: 1 req/s cap → poll slow
   setInterval(loadQuakes,120000);                                  // USGS updates ~1/min; we poll every 2m
   setInterval(loadHazards,900000);                                 // EONET updates ~hourly → poll every 15m
@@ -1964,6 +2233,7 @@ loadCesium().then(function(){
   setInterval(loadFloods,600000);                                  // EA flood warnings update ~15m → poll every 10m
   setInterval(loadFireballs,1800000);                              // CNEOS fireballs sporadic → poll every 30m
   setInterval(loadGPSJam,21600000);                                // GPSJam is a daily file → refresh every 6h
+  setInterval(function(){ if(lazyLoaded.metar) loadMETAR(); },600000); // METAR hourly → refresh every 10m when shown
 }).catch(function(err){
   bootError('ThirdEye could not load the 3D globe engine (CesiumJS) from its CDNs.<br><br>'+
     'This is almost always a network/blocked-CDN issue. When you host this on Netlify or open it on a normal connection it will load.<br><br><span class="mono" style="font-size:10px;color:#4C5661">'+esc(String(err&&err.message||err))+'</span>');
