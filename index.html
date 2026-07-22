@@ -349,7 +349,8 @@ body.reticle-on #reticle{opacity:.5}
     <button data-mode="default" class="on"><span class="swatch" style="background:#2A3541"></span>Default tactical</button>
     <button data-mode="nvg"><span class="swatch" style="background:#00ff88"></span>Night vision</button>
     <button data-mode="thermal"><span class="swatch" style="background:linear-gradient(45deg,#7a1fff,#ff2d00,#ffd000)"></span>Thermal-style</button>
-    <button data-mode="reticle" style="border-top:1px solid var(--line);margin-top:2px;border-radius:0 0 3px 3px"><span class="swatch" style="background:#F2A900"></span>Reticle overlay</button>
+    <button data-mode="reticle" style="border-top:1px solid var(--line);margin-top:2px"><span class="swatch" style="background:#F2A900"></span>Reticle overlay</button>
+    <button id="godBtn" style="border-top:1px solid var(--line);margin-top:2px;border-radius:0 0 3px 3px"><span class="swatch" style="background:#FF5964"></span>God mode</button>
   </div>
 
   <!-- basemap switch -->
@@ -392,7 +393,8 @@ var FEEDS = {
   tle: function(g){ return { proxy:'/feeds/celestrak/'+g, direct:'https://celestrak.org/NORAD/elements/gp.php?GROUP='+g+'&FORMAT=tle' }; },
   // EONET + Launch Library 2 are CORS-enabled + key-free → fetched directly (proxy===direct, no netlify.toml change needed)
   hazard: { proxy:'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200', direct:'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200' },
-  launch: { proxy:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true', direct:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true' }
+  launch: { proxy:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true', direct:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true' },
+  aurora: { proxy:'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json', direct:'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json' }
 };
 function fetchFeed(spec){
   var order = HOSTED ? [spec.proxy, spec.direct] : [spec.direct, spec.proxy];
@@ -497,10 +499,15 @@ var LAYERS = {
   launch:{ id:'launch', group:'SPACE', name:'Rocket launches', sym:'◎', color:'#9B8CFF',
            on:true, opacity:1, count:0, status:'idle',
            evidence:'OFFICIAL REPORT', source:'The Space Devs · Launch Library 2 (upcoming)',
-           attr:'The Space Devs / Launch Library 2' }
+           attr:'The Space Devs / Launch Library 2' },
+  aurora:{ id:'aurora', group:'SPACE', name:'Auroral oval', sym:'≈', color:'#37E0A0',
+           on:false, opacity:0.85, count:0, status:'idle',
+           evidence:'MODEL OUTPUT', source:'NOAA SWPC · OVATION aurora now-cast',
+           attr:'NOAA Space Weather Prediction Center (OVATION)' }
 };
 var GROUPS = ['SPACE','ENVIRONMENT','AIR'];
 var soloLayer = null;
+var GODMODE = false; // §3.5-E panoptic view: labels on aircraft (callsign+alt) and satellites (name)
 
 /* ---------- boot: load Cesium (+ satellite.js) with CDN fallback ---------- */
 function loadScript(src){ return new Promise(function(res,rej){
@@ -605,8 +612,9 @@ function initViewer(){
   DS.air=new Cesium.CustomDataSource('air');
   DS.hazard=new Cesium.CustomDataSource('hazard');
   DS.launch=new Cesium.CustomDataSource('launch');
+  DS.aurora=new Cesium.CustomDataSource('aurora'); DS.aurora.show=false;
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
-  viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch);
+  viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch); viewer.dataSources.add(DS.aurora);
 }
 
 /* switch basemap (silent=true lets the auto-fallback re-enter without a guard) */
@@ -664,6 +672,13 @@ function buildSatEntities(){
         color:Cesium.Color.WHITE },
         // depth-tested (no disableDepthTest): satellites on the FAR side of the globe
         // are hidden behind it, so they read as anchored in 3D instead of bleeding through.
+      label:{ text:(s.name||('NORAD '+s.norad)), show:GODMODE,
+        font:'600 9px "JetBrains Mono", ui-monospace, monospace',
+        fillColor:Cesium.Color.fromCssColorString('#9FE9FF'), outlineColor:Cesium.Color.fromCssColorString('#05070A'),
+        outlineWidth:3, style:Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset:new Cesium.Cartesian2(9,0),
+        horizontalOrigin:Cesium.HorizontalOrigin.LEFT, verticalOrigin:Cesium.VerticalOrigin.CENTER,
+        distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0.0,15000000.0),
+        disableDepthTestDistance:Number.POSITIVE_INFINITY },
       properties:{ te_layer:'sat', te:s }
     });
     s.entity._baseColor='#39C6E6';
@@ -790,6 +805,41 @@ function loadLaunches(){
     refreshHealth(); renderLayers();
   }).catch(function(){ LAYERS.launch.status='unavailable'; refreshHealth(); renderLayers(); });
 }
+
+/* =====================================================================
+   LAYER: auroral oval (NOAA SWPC OVATION now-cast) — Space weather
+   ===================================================================== */
+function loadAurora(){
+  LAYERS.aurora.status='loading'; refreshHealth();
+  fetchFeed(FEEDS.aurora).then(function(r){return r.json();}).then(function(d){
+    DS.aurora.entities.removeAll();
+    var arr=d.coordinates||[], ft=d['Forecast Time']||d['Observation Time']||null, n=0;
+    for(var i=0;i<arr.length && n<3500;i+=2){ // subsample + cap for performance
+      var c=arr[i]; if(!c) continue; var val=c[2]; if(val<20) continue;
+      var lon=c[0]>180?c[0]-360:c[0], lat=c[1];
+      var a=Math.min(1,0.22+val/70);
+      DS.aurora.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(lon,lat,120000),
+        point:{ pixelSize:5, color:Cesium.Color.fromCssColorString('#37E0A0').withAlpha(a),
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'aurora', te:{ val:val, ft:ft, lon:lon, lat:lat } }
+      });
+      n++;
+    }
+    LAYERS.aurora.count=n; LAYERS.aurora.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.aurora.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelAurora(t){
+  $('#intelType').textContent='SPACE WX · AURORA';
+  var html='<h2>'+t.val+'% aurora</h2><div class="subttl">OVATION now-cast probability</div>';
+  html+='<div class="badges">'+freshBadge('model','MODEL OUTPUT · NOAA SWPC')+
+        (t.ft?freshBadge('live','VALID '+esc(String(t.ft).replace('T',' '))):'')+'</div>';
+  html+=sect('Cell')+kv([['PROBABILITY',t.val+'%'],['LATITUDE',t.lat.toFixed(1)+'°'],['LONGITUDE',t.lon.toFixed(1)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>NOAA SWPC\'s OVATION model estimates the chance of visible aurora in each grid cell over the next ~30-90 minutes. Brighter green = higher probability. A model now-cast, not a direct observation.</div>';
+  html+='<div class="srcline">Source: NOAA Space Weather Prediction Center · OVATION</div>';
+  $('#intelBody').innerHTML=html;
+}
 function intelHazard(t){
   var ev=t.ev, p=t.pt||{};
   $('#intelType').textContent='ENVIRONMENT · '+String(t.cat||'HAZARD').toUpperCase();
@@ -887,15 +937,15 @@ function renderAircraft(list, simulated){
         alignedAxis:Cesium.Cartesian3.ZERO,
         color:Cesium.Color.WHITE.withAlpha(stale?0.55:1),
         disableDepthTestDistance:Number.POSITIVE_INFINITY },
-      // type-code label; distanceDisplayCondition keeps it hidden at global zoom (restraint)
-      label:{ text:String(a.t||''),
+      // type-code label normally; callsign + altitude in God mode (wider zoom range)
+      label:{ text:(GODMODE?((a.flight||'').trim()+(a.alt_baro!=null?('  '+(a.alt_baro==='ground'?'GND':((a.alt_baro/1000).toFixed(0)+'k'))):'')):String(a.t||'')),
         font:'600 10px "JetBrains Mono", ui-monospace, monospace',
         fillColor:Cesium.Color.fromCssColorString(emg?'#FF5964':'#FFD98A'),
         outlineColor:Cesium.Color.fromCssColorString('#05070A'), outlineWidth:3,
         style:Cesium.LabelStyle.FILL_AND_OUTLINE,
         pixelOffset:new Cesium.Cartesian2(11,0),
         horizontalOrigin:Cesium.HorizontalOrigin.LEFT, verticalOrigin:Cesium.VerticalOrigin.CENTER,
-        distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0.0,3500000.0),
+        distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0.0, GODMODE?9000000.0:3500000.0),
         disableDepthTestDistance:Number.POSITIVE_INFINITY },
       properties:{ te_layer:'air', te:{a:a,emg:emg,sim:!!simulated,seen:seen} }
     });
@@ -1045,6 +1095,7 @@ function selectEntity(e){
   else if(layer==='quake'){ intelQuake(te); }
   else if(layer==='hazard'){ intelHazard(te); }
   else if(layer==='launch'){ intelLaunch(te); }
+  else if(layer==='aurora'){ intelAurora(te); }
   else { intelAir(te); selectedAirHex=(te.a&&te.a.hex)||null; if(selectedAirHex) drawAirTrail(selectedAirHex); }
   $('#intel').classList.add('show');
 }
@@ -1193,6 +1244,17 @@ function setMode(m){
 }
 function setReticle(on){ reticleOn=on; document.body.classList.toggle('reticle-on',on);
   $('#vm button[data-mode="reticle"]').classList.toggle('on',on); }
+function setGodMode(on){
+  GODMODE=on; var b=$('#godBtn'); if(b) b.classList.toggle('on',on);
+  DS.air.entities.values.forEach(function(e){
+    if(!e.label||!e.properties||!e.properties.te) return;
+    var te=e.properties.te.getValue(); var a=te&&te.a; if(!a) return;
+    e.label.text = on ? ((a.flight||'').trim()+(a.alt_baro!=null?('  '+(a.alt_baro==='ground'?'GND':((a.alt_baro/1000).toFixed(0)+'k'))):'')) : String(a.t||'');
+    e.label.distanceDisplayCondition = new Cesium.DistanceDisplayCondition(0, on?9000000:3500000);
+  });
+  DS.sat.entities.values.forEach(function(e){ if(e.label) e.label.show=on; });
+  if(scene) scene.requestRender();
+}
 
 var WS={ all:['sat','quake','air','hazard','launch'], air:['air'], space:['sat','launch'], env:['quake','hazard'] };
 var WS_CAM={ all:[6,44,17000000], air:[2,52,7000000], space:[0,10,32000000], env:[120,10,20000000] };
@@ -1262,6 +1324,7 @@ function wireUI(){
   $$('#vm button[data-mode]').forEach(function(b){ b.onclick=function(){
     if(b.dataset.mode==='reticle') setReticle(!reticleOn); else setMode(b.dataset.mode); }; });
   $$('#bl button').forEach(function(b){ b.onclick=function(){ setBasemap(b.dataset.base); }; });
+  $('#godBtn').onclick=function(){ setGodMode(!GODMODE); };
   $$('#ws button').forEach(function(b){ b.onclick=function(){ setWorkspace(b.dataset.ws); }; });
   $('#north').onclick=function(){ camera.flyTo({destination:camera.positionWC,orientation:{heading:0,pitch:camera.pitch,roll:0},duration:0.6}); };
   $('#palInput').oninput=function(){ renderPalette(this.value); };
@@ -1293,12 +1356,14 @@ loadCesium().then(function(){
   loadAircraft();
   loadHazards();
   loadLaunches();
+  loadAurora();
   // refresh loops (respect upstream rate limits)
   setInterval(updateSatPositions,1000);
   setInterval(function(){ if(!SIM_ON) loadAircraft(); },20000);   // airplanes.live: 1 req/s cap → poll slow
   setInterval(loadQuakes,120000);                                  // USGS updates ~1/min; we poll every 2m
   setInterval(loadHazards,900000);                                 // EONET updates ~hourly → poll every 15m
   setInterval(loadLaunches,1800000);                               // Launch Library 2: ~15 req/hr → poll every 30m
+  setInterval(loadAurora,600000);                                  // OVATION now-cast → poll every 10m
 }).catch(function(err){
   bootError('ThirdEye could not load the 3D globe engine (CesiumJS) from its CDNs.<br><br>'+
     'This is almost always a network/blocked-CDN issue. When you host this on Netlify or open it on a normal connection it will load.<br><br><span class="mono" style="font-size:10px;color:#4C5661">'+esc(String(err&&err.message||err))+'</span>');
