@@ -9,11 +9,23 @@
 <!--
   ThirdEye · prototype v0.1  (single-file, no build step, no API keys)
   ------------------------------------------------------------------
-  A dark, tactical 3D globe (CesiumJS) that renders three genuinely-live,
-  key-free public feeds:
+  A dark, tactical 3D globe (CesiumJS) that renders genuinely-live, key-free
+  public feeds, each labelled with its evidence class:
      SPACE       satellites   CelesTrak TLE + satellite.js  (SGP4 model output)
+                 launches     Launch Library 2              (official schedule)
+                 auroral oval NOAA SWPC OVATION             (model now-cast)
+                 fireballs    NASA JPL CNEOS                (official, US Gov sensors)
      ENVIRONMENT earthquakes  USGS all_day GeoJSON          (official report)
+                 nat. hazards NASA EONET                    (official aggregate)
+                 cyclones     NOAA NHC active storms        (official advisory)
+                 disaster alr GDACS EVENTS4APP (UN/EC)       (official alert score)
+                 precip radar RainViewer composite          (observed raster)
+                 UK floods    Environment Agency RT          (official flood warning)
      AIR         military ac  airplanes.live /v2/mil        (direct ADS-B observation)
+     SIGNALS     GPS interfer GPSJam (ADS-B derived)         (inferred, daily aggregate)
+
+  Every feed has a matching entry in the in-app SOURCES registry (licence, rate
+  limits, auth, CORS) and in docs/sources.md — the brief's three-part "done" bar.
 
   Design + honesty rules follow the ThirdEye brief:
     - restraint: thin chrome, detail on demand, semantic colour, shape symbology
@@ -394,7 +406,63 @@ var FEEDS = {
   // EONET + Launch Library 2 are CORS-enabled + key-free → fetched directly (proxy===direct, no netlify.toml change needed)
   hazard: { proxy:'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200', direct:'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200' },
   launch: { proxy:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true', direct:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true' },
-  aurora: { proxy:'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json', direct:'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json' }
+  aurora: { proxy:'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json', direct:'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json' },
+  // NHC + GDACS lack reliable CORS headers → same-origin Netlify proxy when hosted (see netlify.toml)
+  nhc:    { proxy:'/feeds/nhc/storms', direct:'https://www.nhc.noaa.gov/CurrentStorms.json' },
+  gdacs:  { proxy:'/feeds/gdacs/events', direct:'https://www.gdacs.org/gdacsapi/api/events/geteventlist/EVENTS4APP' },
+  // RainViewer serves both metadata and tiles with permissive CORS → direct is fine
+  radar:  { proxy:'https://api.rainviewer.com/public/weather-maps.json', direct:'https://api.rainviewer.com/public/weather-maps.json' },
+  // UK Environment Agency flood-monitoring (open data) — proxied when hosted for CORS safety
+  eaFloods:{ proxy:'/feeds/ea/floods', direct:'https://environment.data.gov.uk/flood-monitoring/id/floods' },
+  eaAreas: { proxy:'/feeds/ea/floodAreas', direct:'https://environment.data.gov.uk/flood-monitoring/id/floodAreas' },
+  // NASA JPL CNEOS fireball reports — CORS-open, proxied for safety
+  fireball:{ proxy:'/feeds/jpl/fireball?limit=200&sort=-date', direct:'https://ssd-api.jpl.nasa.gov/fireball.api?limit=200&sort=-date' },
+  // GPSJam daily GPS-interference CSV (per day, per H3-res-4 cell) — proxied when hosted
+  gpsjam: function(date){ return { proxy:'/feeds/gpsjam/'+date+'-h3_4.csv', direct:'https://gpsjam.org/data/'+date+'-h3_4.csv' }; }
+};
+
+/* ---------- source registry (licence · rate · auth · CORS · evidence) ----------
+   The brief's "done" bar for a feed = (1) a source-registry entry, (2) an adapter,
+   (3) a LayerSpec. This object is the in-app source registry; docs/sources.md carries
+   the same facts in prose. Every LAYER points at a SOURCES key via its `srcKey`. */
+var SOURCES = {
+  celestrak:     { name:'CelesTrak GP (TLE)', org:'CelesTrak / Dr T.S. Kelso', url:'https://celestrak.org',
+                   licence:'Free reuse, attribution requested', rate:'Be gentle; cache ≥2h per group', auth:'none',
+                   cors:'no CORS headers → proxied when hosted', evidence:'MODEL OUTPUT (SGP4 propagation)' },
+  usgs_quakes:   { name:'USGS Earthquake Hazards (all_day)', org:'U.S. Geological Survey', url:'https://earthquake.usgs.gov',
+                   licence:'U.S. public domain', rate:'Feed regenerates ~1/min', auth:'none',
+                   cors:'CORS-enabled → direct works, proxied for safety', evidence:'OFFICIAL REPORT (instrumental)' },
+  airplanes_live:{ name:'airplanes.live ADS-B (/v2/mil)', org:'airplanes.live community', url:'https://airplanes.live',
+                   licence:'Free, non-commercial; attribution', rate:'~1 req/s cap', auth:'none',
+                   cors:'proxied when hosted', evidence:'DIRECT OBSERVATION (ADS-B)' },
+  eonet:         { name:'NASA EONET v3', org:'NASA Earth Observatory', url:'https://eonet.gsfc.nasa.gov',
+                   licence:'NASA open data', rate:'Updates ~hourly', auth:'none',
+                   cors:'CORS-enabled → direct', evidence:'OFFICIAL REPORT (aggregated)' },
+  ll2:           { name:'Launch Library 2', org:'The Space Devs', url:'https://thespacedevs.com',
+                   licence:'CC BY 4.0', rate:'~15 req/hr unauth', auth:'none (higher limits with key)',
+                   cors:'CORS-enabled → direct', evidence:'OFFICIAL REPORT (scheduled)' },
+  swpc_ovation:  { name:'NOAA SWPC OVATION aurora', org:'NOAA Space Weather Prediction Center', url:'https://www.swpc.noaa.gov',
+                   licence:'U.S. public domain', rate:'Now-cast refresh ~5 min', auth:'none',
+                   cors:'CORS-enabled → direct', evidence:'MODEL OUTPUT (now-cast)' },
+  nhc_storms:    { name:'NHC Active Tropical Cyclones', org:'NOAA National Hurricane Center', url:'https://www.nhc.noaa.gov',
+                   licence:'U.S. public domain', rate:'Advisories ~every 6h (intermediate 3h)', auth:'none',
+                   cors:'no CORS headers → proxied when hosted', evidence:'OFFICIAL REPORT (forecast advisory)' },
+  gdacs:         { name:'GDACS multi-hazard alerts', org:'UN OCHA / European Commission JRC', url:'https://www.gdacs.org',
+                   licence:'Free reuse, attribution (GDACS)', rate:'Event list refreshed continuously', auth:'none',
+                   cors:'inconsistent CORS → proxied when hosted', evidence:'OFFICIAL REPORT (alert scoring)' },
+  rainviewer:    { name:'RainViewer global radar', org:'RainViewer', url:'https://www.rainviewer.com',
+                   licence:'Free tier, attribution required', rate:'Frames every ~10 min', auth:'none',
+                   cors:'permissive CORS → direct', evidence:'OBSERVED (composite radar/precip)' },
+  ea_floods:     { name:'EA flood warnings (real-time)', org:'UK Environment Agency', url:'https://environment.data.gov.uk/flood-monitoring',
+                   licence:'Open Government Licence v3', rate:'Warnings update ~every 15 min', auth:'none',
+                   cors:'proxied when hosted', evidence:'OFFICIAL REPORT (statutory flood warning)' },
+  jpl_fireball:  { name:'CNEOS fireball reports', org:'NASA JPL / CNEOS', url:'https://cneos.jpl.nasa.gov/fireballs',
+                   licence:'NASA/JPL open data', rate:'Sporadic (as events are detected)', auth:'none',
+                   cors:'CORS-open → direct, proxied for safety', evidence:'OFFICIAL REPORT (US Gov sensors)' },
+  gpsjam:        { name:'GPSJam GPS interference', org:'GPSJam (J. Wiseman) · data © adsbexchange.com', url:'https://gpsjam.org',
+                   licence:'Attribution; underlying data © adsbexchange.com', rate:'Daily aggregate (one CSV per day)', auth:'none',
+                   cors:'no CORS headers → proxied when hosted; needs h3-js to draw hexes',
+                   evidence:'INFERRED (aggregated ADS-B navigation-integrity)' }
 };
 function fetchFeed(spec){
   var order = HOSTED ? [spec.proxy, spec.direct] : [spec.direct, spec.proxy];
@@ -470,8 +538,55 @@ function launchIcon(fill){ // ring + centre dot + upward tick (a launch pad / ta
     ctx.strokeStyle=fill; ctx.lineWidth=s*0.10; ctx.beginPath(); ctx.moveTo(s*0.5,s*0.20); ctx.lineTo(s*0.5,s*0.02); ctx.stroke();
   });
 }
+function cycloneIcon(fill){ // two curved spiral arms + eye — a hurricane glyph
+  return makeIcon(52, function(ctx,s){
+    var cx=s*0.5, cy=s*0.5;
+    ctx.lineCap='round'; ctx.lineJoin='round';
+    function arm(rot){
+      ctx.save(); ctx.translate(cx,cy); ctx.rotate(rot);
+      ctx.beginPath(); ctx.moveTo(0,-s*0.06);
+      ctx.bezierCurveTo(s*0.28,-s*0.10, s*0.34,s*0.16, s*0.10,s*0.34);
+      // halo then colour
+      ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=s*0.15; ctx.stroke();
+      ctx.strokeStyle=fill; ctx.lineWidth=s*0.09; ctx.stroke();
+      ctx.restore();
+    }
+    arm(0); arm(Math.PI);
+    ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.arc(cx,cy,s*0.085,0,6.2832); ctx.fill();
+    ctx.fillStyle=fill; ctx.beginPath(); ctx.arc(cx,cy,s*0.055,0,6.2832); ctx.fill();
+  });
+}
+function hexIcon(fill){ // filled hexagon — GDACS alert marker (distinct from EONET triangles)
+  return makeIcon(42, function(ctx,s){
+    var cx=s*0.5, cy=s*0.5, r=s*0.36;
+    ctx.beginPath();
+    for(var k=0;k<6;k++){ var a=Math.PI/6 + k*Math.PI/3; var x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
+      k?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+    ctx.closePath();
+    ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.lineWidth=s*0.16; ctx.stroke();
+    ctx.fillStyle=fill; ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=s*0.06; ctx.stroke();
+  });
+}
 var _hazIcons={};
 function hazIcon(color){ return _hazIcons[color]||(_hazIcons[color]=triangleIcon(color)); }
+function dropIcon(fill){ // teardrop — flood warning marker
+  return makeIcon(40, function(ctx,s){
+    var cx=s*0.5;
+    ctx.beginPath();
+    ctx.moveTo(cx,s*0.10);
+    ctx.bezierCurveTo(s*0.86,s*0.52, s*0.74,s*0.90, cx,s*0.90);
+    ctx.bezierCurveTo(s*0.26,s*0.90, s*0.14,s*0.52, cx,s*0.10);
+    ctx.closePath();
+    ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.lineWidth=s*0.15; ctx.stroke();
+    ctx.fillStyle=fill; ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=s*0.055; ctx.stroke();
+  });
+}
+var _cycIcons={}, _gdacsIcons={}, _dropIcons={};
+function cycIcon(color){ return _cycIcons[color]||(_cycIcons[color]=cycloneIcon(color)); }
+function gdacsIcon(color){ return _gdacsIcons[color]||(_gdacsIcons[color]=hexIcon(color)); }
+function floodIcon(color){ return _dropIcons[color]||(_dropIcons[color]=dropIcon(color)); }
 var ICO = {
   air: chevronIcon('#F2A900'), airHot: chevronIcon('#FF5964'), airDim: chevronIcon('#D9A93B'),
   sat: diamondIcon('#39C6E6'), satSel: diamondIcon('#F2A900'),
@@ -501,11 +616,38 @@ var LAYERS = {
            evidence:'OFFICIAL REPORT', source:'The Space Devs · Launch Library 2 (upcoming)',
            attr:'The Space Devs / Launch Library 2' },
   aurora:{ id:'aurora', group:'SPACE', name:'Auroral oval', sym:'≈', color:'#37E0A0',
-           on:false, opacity:0.85, count:0, status:'idle',
+           on:false, opacity:0.85, count:0, status:'idle', srcKey:'swpc_ovation',
            evidence:'MODEL OUTPUT', source:'NOAA SWPC · OVATION aurora now-cast',
-           attr:'NOAA Space Weather Prediction Center (OVATION)' }
+           attr:'NOAA Space Weather Prediction Center (OVATION)' },
+  cyclone:{ id:'cyclone', group:'ENVIRONMENT', name:'Tropical cyclones', sym:'✳', color:'#39C6E6',
+           on:true, opacity:1, count:0, status:'idle', srcKey:'nhc_storms',
+           evidence:'OFFICIAL REPORT', source:'NOAA NHC · active tropical cyclones',
+           attr:'NOAA National Hurricane Center' },
+  gdacs: { id:'gdacs', group:'ENVIRONMENT', name:'Disaster alerts', sym:'⬡', color:'#F2A900',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'gdacs',
+           evidence:'OFFICIAL REPORT', source:'GDACS · multi-hazard alert scoring (UN/EC)',
+           attr:'GDACS — UN OCHA / EC Joint Research Centre' },
+  radar: { id:'radar', group:'ENVIRONMENT', name:'Precipitation radar', sym:'▦', color:'#5B8CFF',
+           on:false, opacity:0.62, count:0, status:'idle', srcKey:'rainviewer', type:'raster',
+           evidence:'OBSERVED', source:'RainViewer · global composite radar/precip',
+           attr:'RainViewer' },
+  floods:{ id:'floods', group:'ENVIRONMENT', name:'UK flood warnings', sym:'❥', color:'#5B8CFF',
+           on:true, opacity:1, count:0, status:'idle', srcKey:'ea_floods',
+           evidence:'OFFICIAL REPORT', source:'UK Environment Agency · real-time flood warnings',
+           attr:'Environment Agency (OGL v3)' },
+  fireball:{ id:'fireball', group:'SPACE', name:'Fireballs / bolides', sym:'✷', color:'#FFB454',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'jpl_fireball',
+           evidence:'OFFICIAL REPORT', source:'NASA JPL CNEOS · atmospheric fireball reports',
+           attr:'NASA JPL / CNEOS' },
+  gpsjam:{ id:'gpsjam', group:'SIGNALS', name:'GPS interference', sym:'⚑', color:'#F2A900',
+           on:true, opacity:1, count:0, status:'idle', srcKey:'gpsjam', type:'poly',
+           evidence:'INFERRED', source:'GPSJam · daily GPS interference (ADS-B derived)',
+           attr:'GPSJam · data © adsbexchange.com' }
 };
-var GROUPS = ['SPACE','ENVIRONMENT','AIR'];
+// link existing layers to their source-registry entries
+LAYERS.sat.srcKey='celestrak'; LAYERS.quake.srcKey='usgs_quakes';
+LAYERS.air.srcKey='airplanes_live'; LAYERS.hazard.srcKey='eonet'; LAYERS.launch.srcKey='ll2';
+var GROUPS = ['SPACE','ENVIRONMENT','AIR','SIGNALS'];
 var soloLayer = null;
 var GODMODE = false; // §3.5-E panoptic view: labels on aircraft (callsign+alt) and satellites (name)
 
@@ -534,12 +676,20 @@ function loadSat(){
     .catch(function(){ return loadScript('https://unpkg.com/satellite.js@5.0.0/dist/satellite.min.js'); })
     .catch(function(){ return null; }); // non-fatal: satellites layer will report unavailable
 }
+function loadH3(){
+  // h3-js draws the GPSJam hexagons from their H3 index. Non-fatal: without it the
+  // GPS-interference layer reports unavailable, everything else is unaffected.
+  return loadScript('https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js')
+    .catch(function(){ return loadScript('https://cdn.jsdelivr.net/npm/h3-js@4.1.0/dist/h3-js.umd.js'); })
+    .catch(function(){ return null; });
+}
 
 /* ---------- application state ---------- */
 var viewer, scene, camera;
 var DS = {}; // CustomDataSource per layer
 var selectedEntity=null, selectedRestore=null;
 var baseLayer=null, currentBase='blue';
+var radarLayer=null; // RainViewer raster overlay (Cesium ImageryLayer, not a CustomDataSource)
 
 /* GIBS basemap (EPSG:4326, no token). REST tiles; the 500m set is 512×512,
    levels 0-7. (256px was the bug that left the globe black.) */
@@ -573,7 +723,7 @@ function attachImageryFallback(layer){
   var fails=0, done=false;
   try{ layer.imageryProvider.errorEvent.addEventListener(function(){
     if(done) return; fails++;
-    if(fails>=6 && currentBase!=='osm'){ done=true; setBasemap('osm', true);
+    if(fails>=40 && currentBase!=='osm'){ done=true; setBasemap('osm', true); // only on sustained failure, not transient GIBS blips
       $('#status').textContent='basemap: OSM fallback (satellite tiles unreachable)'; }
   }); }catch(e){}
 }
@@ -613,8 +763,15 @@ function initViewer(){
   DS.hazard=new Cesium.CustomDataSource('hazard');
   DS.launch=new Cesium.CustomDataSource('launch');
   DS.aurora=new Cesium.CustomDataSource('aurora'); DS.aurora.show=false;
+  DS.cyclone=new Cesium.CustomDataSource('cyclone');
+  DS.gdacs=new Cesium.CustomDataSource('gdacs'); DS.gdacs.show=false;
+  DS.floods=new Cesium.CustomDataSource('floods');
+  DS.fireball=new Cesium.CustomDataSource('fireball'); DS.fireball.show=false;
+  DS.gpsjam=new Cesium.CustomDataSource('gpsjam');
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
   viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch); viewer.dataSources.add(DS.aurora);
+  viewer.dataSources.add(DS.cyclone); viewer.dataSources.add(DS.gdacs);
+  viewer.dataSources.add(DS.floods); viewer.dataSources.add(DS.fireball); viewer.dataSources.add(DS.gpsjam);
 }
 
 /* switch basemap (silent=true lets the auto-fallback re-enter without a guard) */
@@ -883,6 +1040,420 @@ function intelLaunch(t){
 }
 
 /* =====================================================================
+   Generic adapters + shared geo helpers
+   (the checklist prefers a generic standards adapter; GDACS rides this)
+   ===================================================================== */
+function num(v){ var n=parseFloat(v); return isFinite(n)?n:null; }
+function parseCoord(str){ // "14.9N" / "55.0W" -> signed decimal degrees
+  if(str==null) return null;
+  var m=String(str).trim().match(/^(-?[\d.]+)\s*([NSEWnsew]?)$/);
+  if(!m) return null; var val=parseFloat(m[1]); var d=(m[2]||'').toUpperCase();
+  if(d==='S'||d==='W') val=-Math.abs(val); return isFinite(val)?val:null;
+}
+function geoCentroid(g){ // fallback point for non-Point GeoJSON geometries
+  try{
+    var coords;
+    if(g.type==='Point') return g.coordinates;
+    else if(g.type==='Polygon') coords=g.coordinates[0];
+    else if(g.type==='MultiPolygon') coords=g.coordinates[0][0];
+    else if(g.type==='LineString'||g.type==='MultiPoint') coords=g.coordinates;
+    else return null;
+    var sx=0,sy=0,c=0; coords.forEach(function(p){ if(isFinite(p[0])&&isFinite(p[1])){sx+=p[0];sy+=p[1];c++;} });
+    return c?[sx/c,sy/c]:null;
+  }catch(e){ return null; }
+}
+function compass(deg){ if(deg==null||isNaN(deg)) return '—';
+  var pts=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+  return pts[Math.round(((deg%360)+360)%360/22.5)%16]; }
+function badgeC(color,txt){ return '<span class="badge" style="border-color:'+color+';color:'+color+
+  '"><span class="d" style="background:'+color+'"></span>'+txt+'</span>'; }
+/* generic GeoJSON-point adapter: FeatureCollection -> billboards. styleFn(props,feature)
+   returns {icon,color,size} or null to skip. Returns the number of entities added. */
+function plotGeoJSON(ds, gj, layerKey, styleFn){
+  ds.entities.removeAll();
+  var feats=(gj&&gj.features)||[], n=0;
+  feats.forEach(function(f){
+    var g=f.geometry; if(!g) return; var cen=geoCentroid(g); if(!cen) return;
+    var lon=cen[0], lat=cen[1]; if(!isFinite(lon)||!isFinite(lat)) return;
+    var style=styleFn(f.properties||{}, f); if(!style) return;
+    var e=ds.entities.add({
+      position:Cesium.Cartesian3.fromDegrees(lon,lat),
+      billboard:{ image:style.icon, width:style.size||18, height:style.size||18,
+        color:Cesium.Color.WHITE, disableDepthTestDistance:Number.POSITIVE_INFINITY },
+      properties:{ te_layer:layerKey, te:{ props:f.properties||{}, lon:lon, lat:lat } }
+    });
+    e._baseColor=style.color||'#F2A900'; n++;
+  });
+  return n;
+}
+
+/* =====================================================================
+   LAYER: tropical cyclones (NOAA NHC — active tropical cyclones) — Environment
+   ===================================================================== */
+function tcColor(kt){ return kt>=96?'#FF5964':kt>=64?'#FF7A1A':kt>=34?'#F2A900':'#39C6E6'; }
+function tcCat(kt){ // Saffir–Simpson band from max sustained wind (kt)
+  if(kt>=137) return 'Category 5 hurricane'; if(kt>=113) return 'Category 4 hurricane';
+  if(kt>=96) return 'Category 3 hurricane'; if(kt>=83) return 'Category 2 hurricane';
+  if(kt>=64) return 'Category 1 hurricane'; if(kt>=34) return 'Tropical storm';
+  return 'Tropical depression';
+}
+var TC_BASIN={ AL:'Atlantic', EP:'E. Pacific', CP:'C. Pacific', WP:'W. Pacific', IO:'Indian Ocean', SH:'S. Hemisphere' };
+function loadCyclones(){
+  LAYERS.cyclone.status='loading'; refreshHealth();
+  fetchFeed(FEEDS.nhc).then(function(r){return r.json();}).then(function(d){
+    DS.cyclone.entities.removeAll();
+    var storms=d.activeStorms||d.storms||[];
+    storms.forEach(function(st){
+      var lat=num(st.latitudeNumeric); if(lat==null) lat=parseCoord(st.latitude);
+      var lon=num(st.longitudeNumeric); if(lon==null) lon=parseCoord(st.longitude);
+      if(lat==null||lon==null) return;
+      var kt=num(st.intensity), col=tcColor(kt==null?0:kt);
+      var e=DS.cyclone.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(lon,lat),
+        billboard:{ image:cycIcon(col), width:26, height:26, color:Cesium.Color.WHITE,
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        label:{ text:String(st.name||''),
+          font:'600 10px "JetBrains Mono", ui-monospace, monospace',
+          fillColor:Cesium.Color.fromCssColorString('#DDEBF5'), outlineColor:Cesium.Color.fromCssColorString('#05070A'),
+          outlineWidth:3, style:Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset:new Cesium.Cartesian2(15,0),
+          horizontalOrigin:Cesium.HorizontalOrigin.LEFT, verticalOrigin:Cesium.VerticalOrigin.CENTER,
+          distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0.0,20000000.0),
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'cyclone', te:{ st:st, lat:lat, lon:lon, kt:kt, col:col } }
+      });
+      e._baseColor=col;
+      // movement vector (direction of travel) — a small arrow off the eye
+      var dir=num(st.movementDir), spd=num(st.movementSpeed);
+      if(dir!=null){
+        var len=Math.min(4, Math.max(1.4,(spd||6)*0.14)); // degrees, clamped
+        var rad=Cesium.Math.toRadians(dir);
+        var lat2=lat+len*Math.cos(rad);
+        var lon2=lon+len*Math.sin(rad)/Math.max(0.2,Math.cos(Cesium.Math.toRadians(lat)));
+        DS.cyclone.entities.add({ polyline:{
+          positions:[Cesium.Cartesian3.fromDegrees(lon,lat),Cesium.Cartesian3.fromDegrees(lon2,lat2)],
+          width:6, arcType:Cesium.ArcType.GEODESIC,
+          material:new Cesium.PolylineArrowMaterialProperty(Cesium.Color.fromCssColorString(col).withAlpha(0.85)) } });
+      }
+    });
+    LAYERS.cyclone.count=storms.length; LAYERS.cyclone.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.cyclone.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelCyclone(t){
+  var st=t.st; $('#intelType').textContent='ENVIRONMENT · TROPICAL CYCLONE';
+  var kt=t.kt, mph=(kt!=null)?Math.round(kt*1.15078):null, kmh=(kt!=null)?Math.round(kt*1.852):null;
+  var upd=st.lastUpdate?new Date(st.lastUpdate):null;
+  var age=upd?((Date.now()-upd.getTime())/1000):null;
+  var basin=TC_BASIN[String(st.id||'').substring(0,2).toUpperCase()]||'—';
+  var mvDir=num(st.movementDir), mvSpd=num(st.movementSpeed);
+  var mv=(mvDir!=null)?(compass(mvDir)+' ('+Math.round(mvDir)+'°)'+(mvSpd!=null?(' at '+Math.round(mvSpd)+' kt'):'')):'—';
+  var html='<h2>'+esc(st.name||'Tropical cyclone')+'</h2><div class="subttl">'+esc(tcCat(kt==null?0:kt))+' · '+esc(basin)+'</div>';
+  html+='<div class="badges">'+badgeC('#9B8CFF','OFFICIAL · NOAA NHC')+badgeC(t.col,esc(tcCat(kt==null?0:kt).toUpperCase()))+
+        (age!=null?freshBadge(age<6*3600?'live':'stale','UPDATED '+fmtAge(age)+' AGO'):'')+'</div>';
+  html+=sect('Storm')+kv([
+    ['MAX WIND', kt!=null?(kt+' kt · '+mph+' mph · '+kmh+' km/h'):'—', kt!=null&&kt>=64?'hot':''],
+    ['MIN PRESSURE', st.pressure?(st.pressure+' mb'):'—'],
+    ['MOVEMENT', mv],
+    ['CLASSIFICATION', st.classification||'—']]);
+  html+=sect('Position')+kv([
+    ['LATITUDE', t.lat.toFixed(2)+'°'],['LONGITUDE', t.lon.toFixed(2)+'°'],
+    ['ADVISORY', (st.publicAdvisory&&st.publicAdvisory.advNum)?('#'+st.publicAdvisory.advNum):'—'],
+    ['LAST UPDATE', upd?upd.toISOString().replace('T',' ').replace(/\..+/,'Z'):'—']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>An active tropical cyclone from the U.S. National Hurricane Center, which forecasts the Atlantic and East/Central Pacific basins. The marker is the current centre fix; the arrow shows heading. Winds and category are the latest advisory — the storm\'s full forecast cone lands with the backend.</div>';
+  var link=(st.publicAdvisory&&st.publicAdvisory.url)||'https://www.nhc.noaa.gov';
+  html+='<div class="srcline">Source: <a href="'+esc(link)+'" target="_blank" rel="noopener">NOAA NHC advisory ↗</a></div>';
+  $('#intelBody').innerHTML=html;
+}
+
+/* =====================================================================
+   LAYER: disaster alerts (GDACS EVENTS4APP GeoJSON) — Environment
+   Rides the generic GeoJSON adapter above.
+   ===================================================================== */
+var GDACS_TYPE={ EQ:'Earthquake', TC:'Tropical cyclone', FL:'Flood', VO:'Volcano',
+  DR:'Drought', WF:'Wildfire', TS:'Tsunami' };
+function gdacsColor(level){ var l=String(level||'').toLowerCase();
+  return l==='red'?'#FF5964':l==='orange'?'#FF7A1A':'#37E0A0'; }
+function loadGDACS(){
+  LAYERS.gdacs.status='loading'; refreshHealth();
+  fetchFeed(FEEDS.gdacs).then(function(r){return r.json();}).then(function(gj){
+    var n=plotGeoJSON(DS.gdacs, gj, 'gdacs', function(p){
+      var col=gdacsColor(p.alertlevel);
+      return { icon:gdacsIcon(col), color:col, size:18 };
+    });
+    LAYERS.gdacs.count=n; LAYERS.gdacs.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.gdacs.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function gdacsUrl(u){ if(!u) return ''; if(typeof u==='string') return u; return u.report||u.details||u.geometry||''; }
+function intelGDACS(t){
+  var p=t.props; var typ=GDACS_TYPE[p.eventtype]||'Disaster';
+  $('#intelType').textContent='ENVIRONMENT · '+typ.toUpperCase()+' ALERT';
+  var col=gdacsColor(p.alertlevel), lvl=(p.alertlevel||'Green');
+  var from=p.fromdate?new Date(p.fromdate):null, to=p.todate?new Date(p.todate):null;
+  var sev=p.severitydata||{}, sevTxt=sev.severitytext||(sev.severity!=null?(sev.severity+' '+(sev.severityunit||'')):null);
+  var html='<h2>'+esc(p.name||p.htmldescription||typ)+'</h2><div class="subttl">'+esc(p.country||'—')+
+           (p.eventid?(' · '+esc(String(p.eventid))):'')+'</div>';
+  html+='<div class="badges">'+badgeC('#9B8CFF','OFFICIAL · GDACS')+badgeC(col,esc(String(lvl).toUpperCase())+' ALERT')+
+        (p.iscurrent==='true'||p.iscurrent===true?badgeC('#37E0A0','CURRENT'):badgeC('#7C8794','PAST'))+'</div>';
+  html+=sect('Alert')+kv([
+    ['EVENT TYPE', typ],['ALERT LEVEL', String(lvl).toUpperCase(), lvl==='Red'?'hot':''],
+    ['SEVERITY', sevTxt||'—'],['COUNTRY', p.country||'—']]);
+  html+=sect('Window')+kv([
+    ['FROM', from?from.toISOString().replace('T',' ').replace(/\..+/,'Z'):'—'],
+    ['TO', to?to.toISOString().replace('T',' ').replace(/\..+/,'Z'):'—'],
+    ['LATITUDE', t.lat.toFixed(2)+'°'],['LONGITUDE', t.lon.toFixed(2)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>GDACS (run by the UN and the European Commission) fuses each hazard\'s physical magnitude with the exposed population to score a Green / Orange / Red alert — a measure of likely humanitarian impact, not just size. Orange and Red warrant attention.</div>';
+  var link=gdacsUrl(p.url);
+  html+='<div class="srcline">Source: '+(link?('<a href="'+esc(link)+'" target="_blank" rel="noopener">GDACS report ↗</a>'):'GDACS — UN OCHA / EC JRC')+'</div>';
+  $('#intelBody').innerHTML=html;
+}
+
+/* =====================================================================
+   LAYER: precipitation radar (RainViewer) — Environment · raster overlay
+   A different layer *type*: a Cesium ImageryLayer stacked over the basemap,
+   not a CustomDataSource of entities. Toggle + opacity are handled specially
+   in applyVisibility()/setLayerOpacity().
+   ===================================================================== */
+function loadRadar(){
+  LAYERS.radar.status='loading'; refreshHealth();
+  fetchFeed(FEEDS.radar).then(function(r){return r.json();}).then(function(d){
+    var host=d.host, past=(d.radar&&d.radar.past)||[], now=(d.radar&&d.radar.nowcast)||[];
+    var all=past.concat(now); if(!host||!all.length) throw new Error('no radar frames');
+    var latest=past.length?past[past.length-1]:all[all.length-1];
+    // colour scheme 4 (Universal Blue) · smooth=1 · snow=1  →  "/256/{z}/{x}/{y}/4/1_1.png"
+    var url=host+latest.path+'/256/{z}/{x}/{y}/4/1_1.png';
+    var prov=new Cesium.UrlTemplateImageryProvider({ url:url, maximumLevel:12,
+      credit:new Cesium.Credit('RainViewer') });
+    if(radarLayer){ try{ viewer.imageryLayers.remove(radarLayer,true); }catch(e){} radarLayer=null; }
+    radarLayer=new Cesium.ImageryLayer(prov);
+    radarLayer.alpha=LAYERS.radar.opacity;
+    radarLayer.show=LAYERS.radar.on && !(soloLayer&&soloLayer!=='radar');
+    viewer.imageryLayers.add(radarLayer); // sits above the basemap
+    LAYERS.radar.count=past.length; LAYERS.radar.status='live'; LAYERS.radar._time=latest.time;
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.radar.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+
+/* =====================================================================
+   LAYER: UK flood warnings (Environment Agency real-time API) — Environment
+   Two-step: a one-time flood-area centroid index, joined to the live warnings.
+   ===================================================================== */
+var floodAreaIndex=null; // notation -> {lat,lon,label,river,county}
+function loadFloodAreas(){
+  return fetchFeed(FEEDS.eaAreas).then(function(r){return r.json();}).then(function(d){
+    floodAreaIndex={};
+    (d.items||[]).forEach(function(a){
+      var n=a.notation; var lat=parseFloat(a.lat), lon=parseFloat(a.long);
+      if(n && isFinite(lat) && isFinite(lon))
+        floodAreaIndex[n]={lat:lat,lon:lon,label:a.label,river:a.riverOrSea,county:a.county};
+    });
+    return floodAreaIndex;
+  });
+}
+function floodColor(lvl){ return lvl===1?'#FF5964':lvl===2?'#FF7A1A':lvl===3?'#F2A900':'#7C8794'; }
+function floodSevName(lvl){ return lvl===1?'Severe flood warning':lvl===2?'Flood warning':lvl===3?'Flood alert':'No longer in force'; }
+function loadFloods(){
+  LAYERS.floods.status='loading'; refreshHealth();
+  var pre = floodAreaIndex ? Promise.resolve() : loadFloodAreas().catch(function(){ floodAreaIndex=floodAreaIndex||{}; });
+  pre.then(function(){ return fetchFeed(FEEDS.eaFloods).then(function(r){return r.json();}); }).then(function(d){
+    DS.floods.entities.removeAll();
+    var items=d.items||[], n=0, skipped=0;
+    items.forEach(function(w){
+      var lvl=parseInt(w.severityLevel,10); if(lvl===4) return; // drop "no longer in force"
+      var notation=(w.floodArea&&w.floodArea.notation)||w.floodAreaID;
+      var geo=floodAreaIndex&&floodAreaIndex[notation];
+      if(!geo){ skipped++; return; } // no centroid available for this area
+      var col=floodColor(lvl);
+      var e=DS.floods.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(geo.lon,geo.lat),
+        billboard:{ image:floodIcon(col), width:18, height:18, color:Cesium.Color.WHITE,
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'floods', te:{ w:w, geo:geo, lvl:lvl, col:col } }
+      });
+      e._baseColor=col;
+      if(lvl===1){ (function(ent,base){ ent.billboard.scale=new Cesium.CallbackProperty(function(t){
+        var s=Cesium.JulianDate.toDate(t).getTime()/1000; return 1+0.25*(0.5+0.5*Math.sin(s*3.2)); },false); })(e); }
+    });
+    LAYERS.floods.count=n=DS.floods.entities.values.length; LAYERS.floods.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.floods.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelFloods(t){
+  var w=t.w, geo=t.geo;
+  $('#intelType').textContent='ENVIRONMENT · UK FLOOD';
+  var col=t.col, raised=w.timeRaised?new Date(w.timeRaised):null;
+  var age=raised?((Date.now()-raised.getTime())/1000):null;
+  var html='<h2>'+esc(floodSevName(t.lvl))+'</h2><div class="subttl">'+esc(geo.label||(w.floodArea&&w.floodArea.description)||w.description||'')+'</div>';
+  html+='<div class="badges">'+badgeC('#9B8CFF','OFFICIAL · UK ENV AGENCY')+badgeC(col,esc(String(w.severity||floodSevName(t.lvl)).toUpperCase()))+
+        (age!=null?freshBadge(age<86400?'live':'stale','RAISED '+fmtAge(age)+' AGO'):'')+
+        (w.isTidal?badgeC('#39C6E6','TIDAL'):'')+'</div>';
+  html+=sect('Warning')+kv([
+    ['SEVERITY', floodSevName(t.lvl), t.lvl===1?'hot':''],
+    ['WATERCOURSE', geo.river||(w.floodArea&&w.floodArea.riverOrSea)||'—'],
+    ['COUNTY', geo.county||(w.floodArea&&w.floodArea.county)||'—'],
+    ['RAISED', raised?raised.toISOString().replace('T',' ').replace(/\..+/,'Z'):'—']]);
+  html+=sect('Position')+kv([['LATITUDE',geo.lat.toFixed(3)+'°'],['LONGITUDE',geo.lon.toFixed(3)+'°']]);
+  if(w.message){ html+='<div class="why"><b>Advice</b>'+esc(String(w.message).slice(0,420))+'</div>'; }
+  else { html+='<div class="why"><b>Why you\'re seeing this</b>A statutory flood warning from the UK Environment Agency\'s real-time service. Severe (red) means danger to life; the marker sits at the flood area\'s centroid.</div>'; }
+  html+='<div class="srcline">Source: <a href="https://check-for-flooding.service.gov.uk" target="_blank" rel="noopener">Environment Agency — check for flooding ↗</a></div>';
+  $('#intelBody').innerHTML=html;
+}
+
+/* =====================================================================
+   LAYER: fireballs / bolides (NASA JPL CNEOS) — Space
+   ===================================================================== */
+function loadFireballs(){
+  LAYERS.fireball.status='loading'; refreshHealth();
+  fetchFeed(FEEDS.fireball).then(function(r){return r.json();}).then(function(d){
+    DS.fireball.entities.removeAll();
+    var fields=d.fields||[], idx={}; fields.forEach(function(f,i){ idx[f]=i; });
+    var rows=d.data||[], n=0, now=Date.now();
+    rows.forEach(function(row){
+      var lat=parseFloat(row[idx.lat]), lon=parseFloat(row[idx.lon]);
+      if(!isFinite(lat)||!isFinite(lon)) return;
+      if(String(row[idx['lat-dir']]).toUpperCase()==='S') lat=-Math.abs(lat);
+      if(String(row[idx['lon-dir']]).toUpperCase()==='W') lon=-Math.abs(lon);
+      var impact=parseFloat(row[idx['impact-e']]); // kt TNT
+      var energy=parseFloat(row[idx.energy]);      // 10^10 J radiated
+      var when=row[idx.date]?new Date(String(row[idx.date]).replace(' ','T')+'Z'):null;
+      var ageD=when?((now-when.getTime())/86400000):null;
+      var size=Math.max(6, Math.min(24, 6+(isFinite(impact)?Math.log10(impact+0.1)*7+7:4)));
+      var fresh=(ageD!=null&&ageD<120);
+      var col=fresh?'#FFD98A':'#FFB454';
+      var e=DS.fireball.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(lon,lat, (isFinite(parseFloat(row[idx.alt]))?parseFloat(row[idx.alt]):30)*1000),
+        point:{ pixelSize:size, color:Cesium.Color.fromCssColorString(col).withAlpha(0.92),
+          outlineColor:Cesium.Color.fromCssColorString('#FF7A1A').withAlpha(0.6), outlineWidth:fresh?2:1,
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'fireball', te:{ lat:lat, lon:lon, impact:impact, energy:energy, when:when,
+          alt:parseFloat(row[idx.alt]), vel:parseFloat(row[idx.vel]) } }
+      });
+      e._baseColor=col; n++;
+    });
+    LAYERS.fireball.count=n; LAYERS.fireball.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.fireball.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelFireball(t){
+  $('#intelType').textContent='SPACE · FIREBALL / BOLIDE';
+  var age=t.when?((Date.now()-t.when.getTime())/1000):null;
+  var joules=isFinite(t.energy)?(t.energy*1e10):null; // energy field is in 10^10 J
+  var html='<h2>'+(isFinite(t.impact)?(t.impact>=1?t.impact.toFixed(1):t.impact.toFixed(2))+' kt':'Fireball')+'</h2>'+
+           '<div class="subttl">atmospheric impact energy (kt TNT eq.)</div>';
+  html+='<div class="badges">'+badgeC('#9B8CFF','OFFICIAL · NASA JPL CNEOS')+
+        (age!=null?freshBadge(age<120*86400?'live':'stale','DETECTED '+fmtAge(age)+' AGO'):'')+'</div>';
+  html+=sect('Event')+kv([
+    ['IMPACT ENERGY', isFinite(t.impact)?(t.impact+' kt TNT'):'—'],
+    ['RADIATED', joules!=null?(joules.toExponential(2)+' J'):'—'],
+    ['ALTITUDE', isFinite(t.alt)?(t.alt.toFixed(1)+' km'):'—'],
+    ['VELOCITY', isFinite(t.vel)?(t.vel.toFixed(1)+' km/s'):'—'],
+    ['WHEN (UTC)', t.when?t.when.toISOString().replace('T',' ').replace(/\..+/,'Z'):'—']]);
+  html+=sect('Position')+kv([['LATITUDE',t.lat.toFixed(2)+'°'],['LONGITUDE',t.lon.toFixed(2)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>A bright meteor (bolide) that detonated in the atmosphere, detected by U.S. Government sensors and reported by NASA/JPL\'s Center for Near-Earth Object Studies. Energy is the equivalent yield in kilotons of TNT — most are metre-scale rocks, harmless but energetic.</div>';
+  html+='<div class="srcline">Source: <a href="https://cneos.jpl.nasa.gov/fireballs" target="_blank" rel="noopener">NASA JPL CNEOS fireballs ↗</a></div>';
+  $('#intelBody').innerHTML=html;
+}
+
+/* =====================================================================
+   LAYER: GPS interference (GPSJam daily H3 CSV) — Signals / EW
+   CSV columns: hex,count_good_aircraft,count_bad_aircraft. GPSJam's own
+   metric is bad_frac = (bad-1)/(bad+good): <2% low, <10% medium, else high.
+   We draw only medium/high cells as H3 hexagons (needs h3-js).
+   ===================================================================== */
+function ymd(d){ return d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1,2)+'-'+pad(d.getUTCDate(),2); }
+function h3Boundary(hex){ // -> [[lng,lat], ...] ring, or null
+  if(!window.h3) return null;
+  try{
+    var b = h3.cellToBoundary ? h3.cellToBoundary(hex,true)
+          : h3.h3ToGeoBoundary ? h3.h3ToGeoBoundary(hex,true) : null; // formatAsGeoJson -> [lng,lat]
+    return (b&&b.length)?b:null;
+  }catch(e){ return null; }
+}
+function h3Center(hex){ // -> [lng,lat] or null
+  if(!window.h3) return null;
+  try{
+    var c = h3.cellToLatLng ? h3.cellToLatLng(hex) : h3.h3ToGeo ? h3.h3ToGeo(hex) : null; // [lat,lng]
+    return (c&&c.length>=2)?[c[1],c[0]]:null;
+  }catch(e){ return null; }
+}
+function gpsColor(frac){ return frac>=0.10?'#FF5964':'#F2A900'; } // high=red, medium=amber
+function parseGPSJamCSV(text){
+  var lines=text.split(/\r?\n/), out=[];
+  for(var i=0;i<lines.length;i++){
+    var ln=lines[i]; if(!ln) continue;
+    var parts=ln.split(','); if(parts.length<3) continue;
+    var hex=(parts[0]||'').trim(); if(!hex || /hex/i.test(hex)) continue; // skip header / blanks
+    var good=parseInt(parts[1],10), bad=parseInt(parts[2],10);
+    out.push({hex:hex, good:isFinite(good)?good:0, bad:isFinite(bad)?bad:0});
+  }
+  return out;
+}
+function renderGPSJam(rows, date){
+  DS.gpsjam.entities.removeAll();
+  var flagged=[];
+  rows.forEach(function(r){
+    var denom=r.bad+r.good; if(denom<=0) return;
+    var frac=(r.bad-1)/denom;   // GPSJam's own formula (the -1 damps single-aircraft noise)
+    if(frac<0.02) return;       // show only medium/high interference
+    flagged.push({hex:r.hex, good:r.good, bad:r.bad, frac:frac, denom:denom});
+  });
+  flagged.sort(function(a,b){ return b.frac-a.frac; }); // worst first
+  var CAP=2500, capped=flagged.length>CAP; if(capped) flagged=flagged.slice(0,CAP);
+  var drawn=0;
+  flagged.forEach(function(g){
+    var ring=h3Boundary(g.hex); if(!ring) return;
+    var positions=[];
+    for(var k=0;k<ring.length;k++){ var p=ring[k]; if(isFinite(p[0])&&isFinite(p[1])) positions.push(Cesium.Cartesian3.fromDegrees(p[0],p[1])); }
+    if(positions.length<3) return;
+    var col=gpsColor(g.frac), cen=h3Center(g.hex)||[null,null];
+    var e=DS.gpsjam.entities.add({
+      polygon:{ hierarchy:positions, material:Cesium.Color.fromCssColorString(col).withAlpha(0.32),
+        outline:true, outlineColor:Cesium.Color.fromCssColorString(col).withAlpha(0.85),
+        height:0, arcType:Cesium.ArcType.GEODESIC },
+      properties:{ te_layer:'gpsjam', te:{ hex:g.hex, good:g.good, bad:g.bad, frac:g.frac, denom:g.denom, date:date, lon:cen[0], lat:cen[1] } }
+    });
+    e._baseColor=col; drawn++;
+  });
+  LAYERS.gpsjam.count=drawn; LAYERS.gpsjam.status='live'; LAYERS.gpsjam._date=date; LAYERS.gpsjam._capped=capped;
+  refreshHealth(); renderLayers();
+  if(window.console&&console.info) console.info('[gpsjam] '+date+' — '+drawn+' interference cells'+(capped?(' (capped at '+CAP+')'):''));
+}
+function loadGPSJam(){
+  if(!window.h3){ LAYERS.gpsjam.status='unavailable'; refreshHealth(); renderLayers();
+    if(window.console&&console.info) console.info('[gpsjam] h3-js unavailable — GPS interference layer disabled'); return; }
+  LAYERS.gpsjam.status='loading'; refreshHealth();
+  var now=new Date();
+  // yesterday first (a complete UTC day), then 2 days back, then today (often partial)
+  var dates=[ ymd(new Date(now.getTime()-86400000)), ymd(new Date(now.getTime()-2*86400000)), ymd(now) ];
+  var i=0;
+  (function tryDate(){
+    if(i>=dates.length){ LAYERS.gpsjam.status='unavailable'; refreshHealth(); renderLayers(); return; }
+    var date=dates[i++];
+    fetchFeed(FEEDS.gpsjam(date)).then(function(r){return r.text();}).then(function(txt){
+      if(!txt || txt.charAt(0)==='<') throw new Error('not csv'); // guard HTML 404 pages
+      renderGPSJam(parseGPSJamCSV(txt), date);
+    }).catch(function(){ tryDate(); });
+  })();
+}
+function intelGPS(t){
+  $('#intelType').textContent='SIGNALS · GPS INTERFERENCE';
+  var pct=Math.max(0,t.frac*100), high=t.frac>=0.10;
+  var col=high?'#FF5964':'#F2A900', lvl=high?'HIGH':'MEDIUM';
+  var html='<h2>'+pct.toFixed(0)+'% bad GPS</h2><div class="subttl">'+esc(t.date||'')+' · H3 res-4 cell</div>';
+  html+='<div class="badges">'+badgeC('#39C6E6','INFERRED · GPSJAM')+badgeC(col,lvl+' INTERFERENCE')+'</div>';
+  html+=sect('Cell')+kv([
+    ['INTERFERENCE', pct.toFixed(1)+'%', high?'hot':''],
+    ['BAD / GOOD AC', t.bad+' / '+t.good],
+    ['SAMPLE', t.denom+' aircraft'],
+    ['H3 INDEX', t.hex],
+    ['DATE (UTC)', t.date||'—']]);
+  if(t.lat!=null&&t.lon!=null) html+=sect('Position')+kv([['LATITUDE',t.lat.toFixed(2)+'°'],['LONGITUDE',t.lon.toFixed(2)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>GPSJam aggregates ADS-B navigation-accuracy reports by day. When many aircraft over a cell report degraded GPS, it points to jamming or spoofing. This is an <b style="display:inline">inferred</b> indicator from aircraft behaviour — a daily average, not a live fix or a located transmitter. Data derived from adsbexchange.com.</div>';
+  html+='<div class="srcline">Source: <a href="https://gpsjam.org" target="_blank" rel="noopener">GPSJam ↗</a> · data © adsbexchange.com</div>';
+  $('#intelBody').innerHTML=html;
+}
+
+/* =====================================================================
    LAYER: military aircraft (airplanes.live /v2/mil, ADS-B v2 format)
    ===================================================================== */
 var SIM_ON=false;
@@ -1031,23 +1602,27 @@ function renderLayers(){
   // persistent source attribution (licensing — brief §12)
   var foot=el('div'); foot.style.cssText='padding:9px 11px;border-top:1px solid var(--line);margin-top:4px;'+
     'font-size:9px;color:var(--txt-mute);line-height:1.7;font-family:var(--mono);letter-spacing:.04em';
-  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak';
+  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC<br>NOAA NHC · GDACS · RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange)';
   body.appendChild(foot);
   $('#layChip').textContent=active+' ACTIVE';
 }
 function applyVisibility(){
   Object.keys(LAYERS).forEach(function(k){
     var l=LAYERS[k], show=l.on && !(soloLayer&&soloLayer!==l.id);
+    if(k==='radar'){ if(radarLayer) radarLayer.show=show; return; } // raster overlay, not a datasource
     if(DS[k]) DS[k].show=show;
   });
 }
 function setLayerOpacity(id,val){
+  if(id==='radar'){ if(radarLayer) radarLayer.alpha=val; return; } // raster overlay alpha
   if(!DS[id]) return;
   DS[id].entities.values.forEach(function(e){
     var base=e._baseColor||'#ffffff';
     if(e.billboard){ e.billboard.color=Cesium.Color.WHITE.withAlpha(val); } // canvas icons are pre-coloured
     if(e.point){ e.point.color=Cesium.Color.fromCssColorString(base).withAlpha(0.9*val);
       e.point.outlineColor=Cesium.Color.fromCssColorString(base).withAlpha(0.35*val); }
+    if(e.polygon){ e.polygon.material=Cesium.Color.fromCssColorString(base).withAlpha(0.32*val);
+      e.polygon.outlineColor=Cesium.Color.fromCssColorString(base).withAlpha(0.85*val); }
   });
 }
 
@@ -1056,7 +1631,7 @@ function setLayerOpacity(id,val){
    ===================================================================== */
 function refreshHealth(){
   var host=$('#health'); host.innerHTML='';
-  [['air','AIR'],['sat','SAT'],['quake','SEIS'],['hazard','HAZ'],['launch','LNCH']].forEach(function(p){
+  [['air','AIR'],['sat','SAT'],['quake','SEIS'],['hazard','HAZ'],['launch','LNCH'],['cyclone','TC'],['gdacs','GDAC'],['floods','FLD'],['gpsjam','GPS']].forEach(function(p){
     var l=LAYERS[p[0]]; var cls='';
     if(l.status==='live'||l.status==='sim') cls='ok';
     else if(l.status==='loading'||l.status==='idle'||l.status==='degraded') cls='load';
@@ -1090,12 +1665,22 @@ function selectEntity(e){
   } else if(e.point){ var op=e._baseColor;
     e.point.outlineColor=Cesium.Color.fromCssColorString('#F2A900'); e.point.outlineWidth=3;
     selectedRestore=function(){ e.point.outlineColor=Cesium.Color.fromCssColorString(op).withAlpha(0.35); e.point.outlineWidth=1; };
+  } else if(e.polygon){ var pb=e._baseColor||'#F2A900';
+    e.polygon.material=Cesium.Color.fromCssColorString('#F2A900').withAlpha(0.5);
+    e.polygon.outlineColor=Cesium.Color.fromCssColorString('#F2A900');
+    selectedRestore=function(){ e.polygon.material=Cesium.Color.fromCssColorString(pb).withAlpha(0.32);
+      e.polygon.outlineColor=Cesium.Color.fromCssColorString(pb).withAlpha(0.85); };
   }
   if(layer==='sat'){ intelSat(te); }
   else if(layer==='quake'){ intelQuake(te); }
   else if(layer==='hazard'){ intelHazard(te); }
   else if(layer==='launch'){ intelLaunch(te); }
   else if(layer==='aurora'){ intelAurora(te); }
+  else if(layer==='cyclone'){ intelCyclone(te); }
+  else if(layer==='gdacs'){ intelGDACS(te); }
+  else if(layer==='floods'){ intelFloods(te); }
+  else if(layer==='fireball'){ intelFireball(te); }
+  else if(layer==='gpsjam'){ intelGPS(te); }
   else { intelAir(te); selectedAirHex=(te.a&&te.a.hex)||null; if(selectedAirHex) drawAirTrail(selectedAirHex); }
   $('#intel').classList.add('show');
 }
@@ -1256,7 +1841,8 @@ function setGodMode(on){
   if(scene) scene.requestRender();
 }
 
-var WS={ all:['sat','quake','air','hazard','launch'], air:['air'], space:['sat','launch'], env:['quake','hazard'] };
+var WS={ all:['sat','quake','air','hazard','launch','cyclone','floods','gpsjam'], air:['air','gpsjam'], space:['sat','launch','fireball'],
+  env:['quake','hazard','cyclone','gdacs','floods'] };
 var WS_CAM={ all:[6,44,17000000], air:[2,52,7000000], space:[0,10,32000000], env:[120,10,20000000] };
 function setWorkspace(w){
   soloLayer=null;
@@ -1347,6 +1933,8 @@ setInterval(tickClock,1000); tickClock();
 loadCesium().then(function(){
   return loadSat(); // non-fatal if it fails
 }).then(function(){
+  return loadH3(); // non-fatal: only the GPS-interference layer depends on it
+}).then(function(){
   initViewer(); setupHUD(); wireUI(); refreshHealth(); renderLayers();
   $('#boot').classList.add('gone');
   $('#status').textContent='ready · '+(HOSTED?'proxied feeds':'direct feeds');
@@ -1357,6 +1945,12 @@ loadCesium().then(function(){
   loadHazards();
   loadLaunches();
   loadAurora();
+  loadCyclones();
+  loadGDACS();
+  loadRadar();
+  loadFloods();
+  loadFireballs();
+  loadGPSJam();
   // refresh loops (respect upstream rate limits)
   setInterval(updateSatPositions,1000);
   setInterval(function(){ if(!SIM_ON) loadAircraft(); },20000);   // airplanes.live: 1 req/s cap → poll slow
@@ -1364,6 +1958,12 @@ loadCesium().then(function(){
   setInterval(loadHazards,900000);                                 // EONET updates ~hourly → poll every 15m
   setInterval(loadLaunches,1800000);                               // Launch Library 2: ~15 req/hr → poll every 30m
   setInterval(loadAurora,600000);                                  // OVATION now-cast → poll every 10m
+  setInterval(loadCyclones,900000);                                // NHC advisories ~3-6h → poll every 15m
+  setInterval(loadGDACS,600000);                                   // GDACS event list → poll every 10m
+  setInterval(loadRadar,300000);                                   // RainViewer frames every ~10m → refresh every 5m
+  setInterval(loadFloods,600000);                                  // EA flood warnings update ~15m → poll every 10m
+  setInterval(loadFireballs,1800000);                              // CNEOS fireballs sporadic → poll every 30m
+  setInterval(loadGPSJam,21600000);                                // GPSJam is a daily file → refresh every 6h
 }).catch(function(err){
   bootError('ThirdEye could not load the 3D globe engine (CesiumJS) from its CDNs.<br><br>'+
     'This is almost always a network/blocked-CDN issue. When you host this on Netlify or open it on a normal connection it will load.<br><br><span class="mono" style="font-size:10px;color:#4C5661">'+esc(String(err&&err.message||err))+'</span>');

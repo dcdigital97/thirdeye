@@ -36,6 +36,49 @@
   status = 200
   force = true
 
+# NOAA NHC active tropical cyclones   /feeds/nhc/storms  ->  nhc.noaa.gov/CurrentStorms.json
+[[redirects]]
+  from = "/feeds/nhc/storms"
+  to = "https://www.nhc.noaa.gov/CurrentStorms.json"
+  status = 200
+  force = true
+
+# GDACS multi-hazard alert list       /feeds/gdacs/events  ->  gdacs.org EVENTS4APP
+[[redirects]]
+  from = "/feeds/gdacs/events"
+  to = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/EVENTS4APP"
+  status = 200
+  force = true
+
+# UK Environment Agency flood warnings   /feeds/ea/floods  ->  environment.data.gov.uk
+[[redirects]]
+  from = "/feeds/ea/floods"
+  to = "https://environment.data.gov.uk/flood-monitoring/id/floods"
+  status = 200
+  force = true
+
+# UK EA flood-area centroids             /feeds/ea/floodAreas  ->  environment.data.gov.uk
+[[redirects]]
+  from = "/feeds/ea/floodAreas"
+  to = "https://environment.data.gov.uk/flood-monitoring/id/floodAreas"
+  status = 200
+  force = true
+
+# NASA JPL CNEOS fireball reports         /feeds/jpl/fireball  ->  ssd-api.jpl.nasa.gov
+# (Netlify forwards the incoming query string ?limit=&sort= to the upstream)
+[[redirects]]
+  from = "/feeds/jpl/fireball"
+  to = "https://ssd-api.jpl.nasa.gov/fireball.api"
+  status = 200
+  force = true
+
+# GPSJam daily GPS-interference CSV       /feeds/gpsjam/<date>-h3_4.csv  ->  gpsjam.org/data
+[[redirects]]
+  from = "/feeds/gpsjam/*"
+  to = "https://gpsjam.org/data/:splat"
+  status = 200
+  force = true
+
 # ---- basic headers ------------------------------------------------------------
 [[headers]]
   for = "/*"
