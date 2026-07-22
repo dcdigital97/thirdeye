@@ -354,8 +354,8 @@ body.reticle-on #reticle{opacity:.5}
 
   <!-- basemap switch -->
   <div id="bl">
-    <button data-base="sat" class="on">Satellite</button>
-    <button data-base="blue">Blue Marble</button>
+    <button data-base="blue" class="on">Blue Marble</button>
+    <button data-base="sat">Satellite</button>
     <button data-base="night">Night Lights</button>
     <button data-base="osm">Streets</button>
   </div>
@@ -532,7 +532,7 @@ function loadSat(){
 var viewer, scene, camera;
 var DS = {}; // CustomDataSource per layer
 var selectedEntity=null, selectedRestore=null;
-var baseLayer=null, currentBase='sat';
+var baseLayer=null, currentBase='blue';
 
 /* GIBS basemap (EPSG:4326, no token). REST tiles; the 500m set is 512×512,
    levels 0-7. (256px was the bug that left the globe black.) */
@@ -574,7 +574,7 @@ function attachImageryFallback(layer){
 function initViewer(){
   setBoot('Building scene…');
   Cesium.Ion.defaultAccessToken = undefined; // we never touch ion assets
-  baseLayer = makeBaseLayer('sat');
+  baseLayer = makeBaseLayer('blue'); // GIBS Blue Marble: reliable WebGL texturing (Esri arcgisonline CORS is flaky)
   viewer = new Cesium.Viewer('cesiumContainer',{
     baseLayer: baseLayer, baseLayerPicker:false, geocoder:false, homeButton:false,
     sceneModePicker:false, navigationHelpButton:false, animation:false, timeline:false,
