@@ -1,0 +1,44 @@
+# ThirdEye — Netlify hosting configuration
+# ----------------------------------------
+# The site is a single static file (index.html). The only server-side piece is a
+# set of same-origin proxies for the feeds that browsers block via CORS. Because
+# a status=200 redirect is a *rewrite*, the browser only ever calls same-origin
+# /feeds/* paths — no CORS errors, and no API keys ever touch the client.
+#
+# This keeps the prototype 100% static/free on Netlify. (The full ThirdEye build
+# later adds live AIS/ADS-B WebSocket streams + secrets, which need an always-on
+# backend — Netlify is great for the frontend and light proxies, not persistent
+# sockets. See DEPLOY.md.)
+
+[build]
+  publish = "."
+
+# ---- feed proxies -------------------------------------------------------------
+
+# airplanes.live military ADS-B   /feeds/adsb/mil  ->  api.airplanes.live/v2/mil
+[[redirects]]
+  from = "/feeds/adsb/*"
+  to = "https://api.airplanes.live/v2/:splat"
+  status = 200
+  force = true
+
+# USGS earthquakes (past 24h)     /feeds/usgs/all_day
+[[redirects]]
+  from = "/feeds/usgs/all_day"
+  to = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+  status = 200
+  force = true
+
+# CelesTrak TLE by group          /feeds/celestrak/<group>  (stations, gps-ops, visual, ...)
+[[redirects]]
+  from = "/feeds/celestrak/*"
+  to = "https://celestrak.org/NORAD/elements/gp.php?GROUP=:splat&FORMAT=tle"
+  status = 200
+  force = true
+
+# ---- basic headers ------------------------------------------------------------
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Referrer-Policy = "no-referrer-when-downgrade"
+    X-Content-Type-Options = "nosniff"
