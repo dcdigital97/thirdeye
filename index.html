@@ -389,7 +389,10 @@ var HOSTED = location.protocol === 'http:' || location.protocol === 'https:';
 var FEEDS = {
   air:    { proxy:'/feeds/adsb/mil', direct:'https://api.airplanes.live/v2/mil' },
   quakes: { proxy:'/feeds/usgs/all_day', direct:'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson' },
-  tle: function(g){ return { proxy:'/feeds/celestrak/'+g, direct:'https://celestrak.org/NORAD/elements/gp.php?GROUP='+g+'&FORMAT=tle' }; }
+  tle: function(g){ return { proxy:'/feeds/celestrak/'+g, direct:'https://celestrak.org/NORAD/elements/gp.php?GROUP='+g+'&FORMAT=tle' }; },
+  // EONET + Launch Library 2 are CORS-enabled + key-free → fetched directly (proxy===direct, no netlify.toml change needed)
+  hazard: { proxy:'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200', direct:'https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=200' },
+  launch: { proxy:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true', direct:'https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20&hide_recent_previous=true' }
 };
 function fetchFeed(spec){
   var order = HOSTED ? [spec.proxy, spec.direct] : [spec.direct, spec.proxy];
@@ -447,9 +450,30 @@ function diamondIcon(fill){
     ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=s*0.06; ctx.stroke();
   });
 }
+function triangleIcon(fill){
+  return makeIcon(44, function(ctx,s){
+    ctx.beginPath();
+    ctx.moveTo(s*0.5,s*0.12); ctx.lineTo(s*0.9,s*0.86); ctx.lineTo(s*0.1,s*0.86); ctx.closePath();
+    ctx.lineJoin='round';
+    ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.lineWidth=s*0.15; ctx.stroke();
+    ctx.fillStyle=fill; ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=s*0.05; ctx.stroke();
+  });
+}
+function launchIcon(fill){ // ring + centre dot + upward tick (a launch pad / target)
+  return makeIcon(44, function(ctx,s){
+    ctx.lineWidth=s*0.14; ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.arc(s*0.5,s*0.5,s*0.30,0,6.2832); ctx.stroke();
+    ctx.lineWidth=s*0.10; ctx.strokeStyle=fill; ctx.beginPath(); ctx.arc(s*0.5,s*0.5,s*0.30,0,6.2832); ctx.stroke();
+    ctx.fillStyle=fill; ctx.beginPath(); ctx.arc(s*0.5,s*0.5,s*0.085,0,6.2832); ctx.fill();
+    ctx.strokeStyle=fill; ctx.lineWidth=s*0.10; ctx.beginPath(); ctx.moveTo(s*0.5,s*0.20); ctx.lineTo(s*0.5,s*0.02); ctx.stroke();
+  });
+}
+var _hazIcons={};
+function hazIcon(color){ return _hazIcons[color]||(_hazIcons[color]=triangleIcon(color)); }
 var ICO = {
   air: chevronIcon('#F2A900'), airHot: chevronIcon('#FF5964'), airDim: chevronIcon('#D9A93B'),
-  sat: diamondIcon('#39C6E6'), satSel: diamondIcon('#F2A900')
+  sat: diamondIcon('#39C6E6'), satSel: diamondIcon('#F2A900'),
+  launch: launchIcon('#9B8CFF'), launchSel: launchIcon('#F2A900')
 };
 
 /* ---------- layer registry (drives the layer-manager UI) ---------- */
@@ -465,7 +489,15 @@ var LAYERS = {
   air:   { id:'air', group:'AIR', name:'Military aircraft', sym:'▲', color:'#F2A900',
            on:true, opacity:1, count:0, status:'idle',
            evidence:'DIRECT OBSERVATION', source:'airplanes.live · ADS-B (community, /v2/mil)',
-           attr:'airplanes.live community ADS-B' }
+           attr:'airplanes.live community ADS-B' },
+  hazard:{ id:'hazard', group:'ENVIRONMENT', name:'Natural hazards', sym:'▲', color:'#FF7A1A',
+           on:true, opacity:1, count:0, status:'idle',
+           evidence:'OFFICIAL REPORT', source:'NASA EONET · open natural events',
+           attr:'NASA EONET (Earth Observatory Natural Event Tracker)' },
+  launch:{ id:'launch', group:'SPACE', name:'Rocket launches', sym:'◎', color:'#9B8CFF',
+           on:true, opacity:1, count:0, status:'idle',
+           evidence:'OFFICIAL REPORT', source:'The Space Devs · Launch Library 2 (upcoming)',
+           attr:'The Space Devs / Launch Library 2' }
 };
 var GROUPS = ['SPACE','ENVIRONMENT','AIR'];
 var soloLayer = null;
@@ -571,7 +603,10 @@ function initViewer(){
   DS.sat=new Cesium.CustomDataSource('sat');
   DS.quake=new Cesium.CustomDataSource('quake');
   DS.air=new Cesium.CustomDataSource('air');
+  DS.hazard=new Cesium.CustomDataSource('hazard');
+  DS.launch=new Cesium.CustomDataSource('launch');
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
+  viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch);
 }
 
 /* switch basemap (silent=true lets the auto-fallback re-enter without a guard) */
@@ -697,6 +732,104 @@ function loadQuakes(){
     LAYERS.quake.count=DS.quake.entities.values.length; LAYERS.quake.status='live';
     refreshHealth(); renderLayers();
   }).catch(function(){ LAYERS.quake.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+
+/* =====================================================================
+   LAYER: natural hazards (NASA EONET open events) — Environment
+   ===================================================================== */
+var HAZ_CAT={ Wildfires:'#FF7A1A', Volcanoes:'#FF5964', 'Severe Storms':'#39C6E6',
+  'Sea and Lake Ice':'#E8EEF4', Icebergs:'#CFE6FF', Floods:'#5B8CFF', Earthquakes:'#37E0A0',
+  'Dust and Haze':'#C9A24B', Landslides:'#C98A5A', 'Temperature Extremes':'#FF9E5B',
+  Drought:'#C9A24B', 'Water Color':'#39C6E6', Snow:'#E8EEF4' };
+function hazColor(cat){ return HAZ_CAT[cat]||'#F2A900'; }
+function loadHazards(){
+  LAYERS.hazard.status='loading'; refreshHealth();
+  fetchFeed(FEEDS.hazard).then(function(r){return r.json();}).then(function(d){
+    DS.hazard.entities.removeAll();
+    (d.events||[]).forEach(function(ev){
+      if(ev.closed) return;
+      var g=ev.geometry&&ev.geometry[ev.geometry.length-1]; if(!g||!g.coordinates) return;
+      var lon, lat;
+      if(g.type==='Point'){ lon=g.coordinates[0]; lat=g.coordinates[1]; }
+      else { var f=g.coordinates; while(Array.isArray(f[0]&&f[0][0])) f=f[0]; lon=f[0]; lat=f[1]; if(Array.isArray(lon)){lon=lon[0];lat=f[0][1];} }
+      if(!isFinite(lon)||!isFinite(lat)) return;
+      var cat=(ev.categories&&ev.categories[0]&&ev.categories[0].title)||'Event';
+      var col=hazColor(cat);
+      var e=DS.hazard.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(lon,lat),
+        billboard:{ image:hazIcon(col), width:17, height:17, color:Cesium.Color.WHITE,
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'hazard', te:{ ev:ev, cat:cat, col:col, when:(g.date||null), pt:g } }
+      });
+      e._baseColor=col;
+    });
+    LAYERS.hazard.count=DS.hazard.entities.values.length; LAYERS.hazard.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.hazard.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+
+/* =====================================================================
+   LAYER: rocket launches (The Space Devs — Launch Library 2) — Space
+   ===================================================================== */
+function loadLaunches(){
+  LAYERS.launch.status='loading'; refreshHealth();
+  fetchFeed(FEEDS.launch).then(function(r){return r.json();}).then(function(d){
+    DS.launch.entities.removeAll();
+    (d.results||[]).forEach(function(L){
+      var pad=L.pad||{}; var lon=parseFloat(pad.longitude), lat=parseFloat(pad.latitude);
+      if(!isFinite(lon)||!isFinite(lat)) return;
+      var e=DS.launch.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(lon,lat,60000),
+        billboard:{ image:ICO.launch, width:18, height:18, color:Cesium.Color.WHITE,
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'launch', te:{ L:L } }
+      });
+      e._baseColor='#9B8CFF';
+    });
+    LAYERS.launch.count=DS.launch.entities.values.length; LAYERS.launch.status='live';
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.launch.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelHazard(t){
+  var ev=t.ev, p=t.pt||{};
+  $('#intelType').textContent='ENVIRONMENT · '+String(t.cat||'HAZARD').toUpperCase();
+  var age=t.when?((Date.now()-new Date(t.when).getTime())/1000):null;
+  var src=(ev.sources&&ev.sources[0]&&ev.sources[0].url)||'';
+  var mag=(p.magnitudeValue!=null)?(p.magnitudeValue+' '+(p.magnitudeUnit||'')):null;
+  var html='<h2>'+esc(ev.title||'Event')+'</h2><div class="subttl">'+esc(t.cat||'')+(ev.id?(' · '+esc(ev.id)):'')+'</div>';
+  html+='<div class="badges">'+freshBadge('report','OFFICIAL REPORT · NASA EONET')+
+        (age!=null?freshBadge(age<86400?'live':'stale','LAST POINT '+fmtAge(age)+' AGO'):'')+'</div>';
+  html+=sect('Event')+kv([['CATEGORY',t.cat],['MAGNITUDE',mag],
+    ['LATITUDE',(p.type==='Point'&&p.coordinates)?p.coordinates[1].toFixed(3)+'°':'—'],
+    ['LONGITUDE',(p.type==='Point'&&p.coordinates)?p.coordinates[0].toFixed(3)+'°':'—'],
+    ['LAST DATA', t.when?new Date(t.when).toISOString().replace('T',' ').replace(/\..+/,'Z'):'—'],
+    ['STATUS', ev.closed?'CLOSED':'OPEN']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>An open natural-event track from NASA\'s Earth Observatory Natural Event Tracker, which consolidates official sources (USGS, Smithsonian GVP, InciWeb and more). Position is the event\'s most recent reported point.</div>';
+  html+='<div class="srcline">Source: '+(src?('<a href="'+esc(src)+'" target="_blank" rel="noopener">'+esc(t.cat)+' source ↗</a>'):'NASA EONET')+'</div>';
+  $('#intelBody').innerHTML=html;
+}
+function intelLaunch(t){
+  var L=t.L, pad=L.pad||{}, loc=(pad.location&&pad.location.name)||'';
+  $('#intelType').textContent='SPACE · ROCKET LAUNCH';
+  var net=L.net?new Date(L.net):null;
+  var tminus=net?((net.getTime()-Date.now())/1000):null;
+  var tstr=(tminus==null)?'—':(tminus>=0?('T- '+fmtAge(tminus)):('T+ '+fmtAge(-tminus)));
+  var html='<h2>'+esc(L.name||'Launch')+'</h2><div class="subttl">'+esc((L.launch_service_provider&&L.launch_service_provider.name)||'')+'</div>';
+  html+='<div class="badges">'+freshBadge('report','OFFICIAL · THE SPACE DEVS')+
+        freshBadge(tminus!=null&&tminus>=0?'live':'stale',tstr)+
+        (L.status&&L.status.abbrev?freshBadge('model',esc(String(L.status.abbrev).toUpperCase())):'')+'</div>';
+  html+=sect('Launch')+kv([
+    ['VEHICLE', L.rocket&&L.rocket.configuration&&L.rocket.configuration.name],
+    ['PROVIDER', L.launch_service_provider&&L.launch_service_provider.name],
+    ['MISSION', L.mission&&L.mission.name],
+    ['NET (UTC)', net?net.toISOString().replace('T',' ').replace(/\..+/,'Z'):'—'],
+    ['STATUS', L.status&&L.status.name]]);
+  html+=sect('Pad')+kv([['PAD', pad.name],['SITE', loc],
+    ['LATITUDE', isFinite(parseFloat(pad.latitude))?parseFloat(pad.latitude).toFixed(3)+'°':'—'],
+    ['LONGITUDE', isFinite(parseFloat(pad.longitude))?parseFloat(pad.longitude).toFixed(3)+'°':'—']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>An upcoming launch from the community-maintained Launch Library 2. Times slip — NET means “no earlier than”. The marker sits on the launch pad.</div>';
+  html+='<div class="srcline">Source: The Space Devs · Launch Library 2</div>';
+  $('#intelBody').innerHTML=html;
 }
 
 /* =====================================================================
@@ -873,7 +1006,7 @@ function setLayerOpacity(id,val){
    ===================================================================== */
 function refreshHealth(){
   var host=$('#health'); host.innerHTML='';
-  [['air','AIR'],['sat','SAT'],['quake','SEIS']].forEach(function(p){
+  [['air','AIR'],['sat','SAT'],['quake','SEIS'],['hazard','HAZ'],['launch','LNCH']].forEach(function(p){
     var l=LAYERS[p[0]]; var cls='';
     if(l.status==='live'||l.status==='sim') cls='ok';
     else if(l.status==='loading'||l.status==='idle'||l.status==='degraded') cls='load';
@@ -901,14 +1034,17 @@ function selectEntity(e){
   // highlight
   if(e.billboard){ var ow=e.billboard.width.getValue?e.billboard.width.getValue():e.billboard.width;
     e.billboard.width=ow*1.5; e.billboard.height=(e.billboard.height.getValue?e.billboard.height.getValue():e.billboard.height)*1.5;
-    if(layer==='sat') e.billboard.image=ICO.satSel;
-    selectedRestore=function(){ e.billboard.width=ow; e.billboard.height=ow; if(layer==='sat') e.billboard.image=ICO.sat; };
+    if(layer==='sat') e.billboard.image=ICO.satSel; else if(layer==='launch') e.billboard.image=ICO.launchSel;
+    selectedRestore=function(){ e.billboard.width=ow; e.billboard.height=ow;
+      if(layer==='sat') e.billboard.image=ICO.sat; else if(layer==='launch') e.billboard.image=ICO.launch; };
   } else if(e.point){ var op=e._baseColor;
     e.point.outlineColor=Cesium.Color.fromCssColorString('#F2A900'); e.point.outlineWidth=3;
     selectedRestore=function(){ e.point.outlineColor=Cesium.Color.fromCssColorString(op).withAlpha(0.35); e.point.outlineWidth=1; };
   }
   if(layer==='sat'){ intelSat(te); }
   else if(layer==='quake'){ intelQuake(te); }
+  else if(layer==='hazard'){ intelHazard(te); }
+  else if(layer==='launch'){ intelLaunch(te); }
   else { intelAir(te); selectedAirHex=(te.a&&te.a.hex)||null; if(selectedAirHex) drawAirTrail(selectedAirHex); }
   $('#intel').classList.add('show');
 }
@@ -1058,7 +1194,7 @@ function setMode(m){
 function setReticle(on){ reticleOn=on; document.body.classList.toggle('reticle-on',on);
   $('#vm button[data-mode="reticle"]').classList.toggle('on',on); }
 
-var WS={ all:['sat','quake','air'], air:['air'], space:['sat'], env:['quake'] };
+var WS={ all:['sat','quake','air','hazard','launch'], air:['air'], space:['sat','launch'], env:['quake','hazard'] };
 var WS_CAM={ all:[6,44,17000000], air:[2,52,7000000], space:[0,10,32000000], env:[120,10,20000000] };
 function setWorkspace(w){
   soloLayer=null;
@@ -1155,10 +1291,14 @@ loadCesium().then(function(){
   loadSatellites();
   loadQuakes();
   loadAircraft();
+  loadHazards();
+  loadLaunches();
   // refresh loops (respect upstream rate limits)
   setInterval(updateSatPositions,1000);
   setInterval(function(){ if(!SIM_ON) loadAircraft(); },20000);   // airplanes.live: 1 req/s cap → poll slow
   setInterval(loadQuakes,120000);                                  // USGS updates ~1/min; we poll every 2m
+  setInterval(loadHazards,900000);                                 // EONET updates ~hourly → poll every 15m
+  setInterval(loadLaunches,1800000);                               // Launch Library 2: ~15 req/hr → poll every 30m
 }).catch(function(err){
   bootError('ThirdEye could not load the 3D globe engine (CesiumJS) from its CDNs.<br><br>'+
     'This is almost always a network/blocked-CDN issue. When you host this on Netlify or open it on a normal connection it will load.<br><br><span class="mono" style="font-size:10px;color:#4C5661">'+esc(String(err&&err.message||err))+'</span>');
