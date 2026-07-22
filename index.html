@@ -291,6 +291,38 @@ body.reticle-on #reticle{opacity:.5}
 #boot.error .be{display:block}
 #boot.error .bt{color:var(--red)}
 
+/* ---------------- measurement / geofence tools strip ---------------- */
+body.tool-active #cesiumContainer canvas{cursor:crosshair}
+#tools{position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:15;display:flex;gap:4px;padding:5px}
+#tools button{display:flex;align-items:center;gap:6px;font-size:10.5px;letter-spacing:.05em;color:var(--txt-dim);
+  border:1px solid var(--line);border-radius:3px;padding:6px 9px;background:rgba(18,24,31,.75)}
+#tools button:hover{color:var(--txt);border-color:var(--line-2)}
+#tools button.on{color:var(--accent);border-color:rgba(242,169,0,.5);background:rgba(242,169,0,.09)}
+#tools .ic{font-size:12px;line-height:1}
+#tools .sep{width:1px;background:var(--line);margin:3px 2px}
+
+/* ---------------- left dock tabs (Layers / Events) ---------------- */
+.ltabs{display:flex;gap:2px}
+.lt{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--txt-dim);padding:4px 9px;border:1px solid transparent;border-radius:3px}
+.lt:hover{color:var(--txt)}
+.lt.on{color:var(--accent);border-color:rgba(242,169,0,.4);background:rgba(242,169,0,.07)}
+
+/* ---------------- events list ---------------- */
+.erow{display:flex;align-items:center;gap:9px;padding:7px 11px;border-left:2px solid transparent;cursor:pointer}
+.erow:hover{background:rgba(255,255,255,.03);border-left-color:var(--accent)}
+.edot{width:8px;height:8px;border-radius:50%;flex:none;box-shadow:0 0 6px rgba(0,0,0,.4)}
+.emeta{flex:1;min-width:0}
+.etitle{font-size:12px;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.esub{font-size:9.5px;color:var(--txt-mute);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.emore,.eempty{padding:8px 11px;font-size:10px;color:var(--txt-mute);font-family:var(--mono);line-height:1.6}
+
+/* ---------------- toast ---------------- */
+#toast{position:fixed;left:50%;bottom:92px;transform:translateX(-50%) translateY(8px);z-index:40;
+  background:rgba(13,17,23,.96);border:1px solid var(--line-2);color:var(--txt);font-size:11.5px;
+  font-family:var(--mono);letter-spacing:.02em;padding:9px 14px;border-radius:4px;box-shadow:var(--shadow);
+  opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;max-width:72vw;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
 @media (max-width:820px){
   #left{width:212px}#intel{width:270px}
   #brand span,.ws-tabs{display:none}
@@ -332,12 +364,16 @@ body.reticle-on #reticle{opacity:.5}
 
   <!-- left dock: layer manager -->
   <div id="left" class="panel">
-    <div class="cap"><div class="t"><span class="hdr">Layers</span></div><span class="chip" id="layChip">0 ACTIVE</span></div>
+    <div class="cap">
+      <div class="ltabs"><button id="tabLayers" class="lt on">Layers</button><button id="tabEvents" class="lt">Events</button></div>
+      <span class="chip" id="layChip">0 ACTIVE</span>
+    </div>
     <div class="lsearch">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
       <input id="laySearch" placeholder="Filter layers…" />
     </div>
     <div class="body" id="layerBody"></div>
+    <div class="body" id="eventBody" style="display:none"></div>
   </div>
 
   <!-- right dock: intel panel -->
@@ -375,6 +411,19 @@ body.reticle-on #reticle{opacity:.5}
     <button data-base="night">Night Lights</button>
     <button data-base="osm">Streets</button>
   </div>
+
+  <!-- measurement / geofence tools -->
+  <div id="tools" class="panel">
+    <button data-tool="ruler"><span class="ic">📏</span>Ruler</button>
+    <button data-tool="ring"><span class="ic">◎</span>Range</button>
+    <button data-tool="geofence"><span class="ic">⬡</span>Geofence</button>
+    <span class="sep"></span>
+    <button id="toolShare"><span class="ic">⤴</span>Share</button>
+    <button id="toolClear"><span class="ic">✕</span>Clear</button>
+  </div>
+
+  <!-- transient toast -->
+  <div id="toast"></div>
 
   <!-- theme honesty label -->
   <div id="themeLabel">Night vision · visual theme — not sensor data</div>
@@ -814,6 +863,9 @@ function initViewer(){
   viewer.dataSources.add(DS.floods); viewer.dataSources.add(DS.fireball); viewer.dataSources.add(DS.gpsjam);
   viewer.dataSources.add(DS.starlink); viewer.dataSources.add(DS.gnss); viewer.dataSources.add(DS.geo);
   viewer.dataSources.add(DS.metar); viewer.dataSources.add(DS.cables);
+  // tool overlays (measurements, geofences, geofence highlights) — always on top of layers
+  measureDS=new Cesium.CustomDataSource('measure'); geofenceDS=new Cesium.CustomDataSource('geofence'); gfHLDS=new Cesium.CustomDataSource('gfhl');
+  viewer.dataSources.add(measureDS); viewer.dataSources.add(geofenceDS); viewer.dataSources.add(gfHLDS);
 }
 
 /* switch basemap (silent=true lets the auto-fallback re-enter without a guard) */
@@ -1782,6 +1834,8 @@ function renderAircraft(list, simulated){
   LAYERS.air.count=added;
   LAYERS.air.status= simulated?'sim':'live';
   refreshHealth(); renderLayers();
+  checkGeofences();                                  // re-evaluate watch zones against the fresh positions
+  if(leftTab==='events') renderEvents();
 }
 function loadAircraft(){
   if(SIM_ON) return;
@@ -1856,7 +1910,7 @@ function renderLayers(){
     'font-size:9px;color:var(--txt-mute);line-height:1.7;font-family:var(--mono);letter-spacing:.04em';
   foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC · NOAA NHC<br>GDACS · RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange) · TeleGeography · NOAA AWC';
   body.appendChild(foot);
-  $('#layChip').textContent=active+' ACTIVE';
+  if(leftTab!=='events') $('#layChip').textContent=active+' ACTIVE';
 }
 /* lazy loaders: heavy/optional layers fetch only on first enable (any path) */
 var LAZY = {
@@ -2052,12 +2106,20 @@ function setupHUD(){
       var lat=Cesium.Math.toDegrees(c.latitude), lon=Cesium.Math.toDegrees(c.longitude);
       $('#coord').innerHTML='LAT&nbsp;<b>'+Math.abs(lat).toFixed(4)+'°'+(lat>=0?'N':'S')+'</b>&nbsp;&nbsp;LON&nbsp;<b>'+Math.abs(lon).toFixed(4)+'°'+(lon>=0?'E':'W')+'</b>';
     }
+    if(toolMode){ mouseCart=cart||null;                       // feed the live measurement rubber-band
+      if(draft){ if(draft.type==='ruler'){ var tip=rulerTip(); if(tip) $('#status').textContent='RULER · '+tip; }
+        else if(draft.center){ var r=draftRadius(); $('#status').textContent=(draft.type==='geofence'?'GEOFENCE':'RANGE')+' · R '+fmtDist(r)+' ('+fmtNm(r)+')'; } }
+    }
   },Cesium.ScreenSpaceEventType.MOUSE_MOVE);
   handler.setInputAction(function(click){
+    if(toolMode){ toolClick(click.position); return; }        // in a tool mode, clicks measure instead of select
     var picked=scene.pick(click.position);
     if(picked&&picked.id&&picked.id.properties&&picked.id.properties.te_layer){ selectEntity(picked.id); }
     else { clearSelection(); }
   },Cesium.ScreenSpaceEventType.LEFT_CLICK);
+  // finish a ruler with right-click or double-click
+  handler.setInputAction(function(){ if(toolMode==='ruler'&&draft) finishDraft(false); },Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+  handler.setInputAction(function(){ if(toolMode==='ruler'&&draft) finishDraft(false); },Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
   camera.changed.addEventListener(updateCamHUD);
   camera.percentageChanged=0.02;
@@ -2175,7 +2237,12 @@ function movePal(dir){ var rows=$$('#palRes .pr'); if(!rows.length) return;
 function wireUI(){
   $('#cmdk').onclick=openPalette;
   $('#intelClose').onclick=clearSelection;
-  $('#laySearch').oninput=function(){ renderLayers(); };
+  $('#laySearch').oninput=function(){ if(leftTab==='events') renderEvents(); else renderLayers(); };
+  $('#tabLayers').onclick=function(){ setLeftTab('layers'); };
+  $('#tabEvents').onclick=function(){ setLeftTab('events'); };
+  $$('#tools button[data-tool]').forEach(function(b){ b.onclick=function(){ setTool(b.dataset.tool); }; });
+  $('#toolShare').onclick=shareView;
+  $('#toolClear').onclick=clearTools;
   $$('#vm button[data-mode]').forEach(function(b){ b.onclick=function(){
     if(b.dataset.mode==='reticle') setReticle(!reticleOn); else setMode(b.dataset.mode); }; });
   $$('#bl button').forEach(function(b){ b.onclick=function(){ setBasemap(b.dataset.base); }; });
@@ -2190,8 +2257,225 @@ function wireUI(){
       else if(e.key==='ArrowDown'){ e.preventDefault(); movePal(1); }
       else if(e.key==='ArrowUp'){ e.preventDefault(); movePal(-1); }
       else if(e.key==='Enter'){ e.preventDefault(); if(palItems[palSel]){ palItems[palSel].run(); closePalette(); } }
-    } else if(e.key==='Escape'){ clearSelection(); }
+    } else if(e.key==='Enter'){ if(toolMode==='ruler'&&draft) finishDraft(false); }
+    else if(e.key==='Escape'){ if(draft) finishDraft(true); else if(toolMode) setTool(null); else clearSelection(); }
   });
+}
+
+/* =====================================================================
+   Measurement tools · Range rings · Geofence watchlist · Events · Share
+   ===================================================================== */
+var measureDS, geofenceDS, gfHLDS;
+var toolMode=null, draft=null, mouseCart=null, geofences=[], gfSeq=0, leftTab='layers';
+var C_AMBER='#F2A900', C_RED='#FF5964', C_DARK='#05070A';
+function Ccss(h,a){ var c=Cesium.Color.fromCssColorString(h); return a==null?c:c.withAlpha(a); }
+function pickGlobe(pos){ var ray=camera.getPickRay(pos); return (ray&&scene.globe.pick(ray,scene))||null; }
+function cOf(c3){ return Cesium.Cartographic.fromCartesian(c3); }
+function distM(a,b){ return new Cesium.EllipsoidGeodesic(a,b).surfaceDistance; }        // a,b carto
+function bearingOf(a,b){ return (Cesium.Math.toDegrees(new Cesium.EllipsoidGeodesic(a,b).startHeading)+360)%360; }
+function fmtDist(m){ return m>=1000?(m/1000).toFixed(m>=100000?0:1)+' km':Math.round(m)+' m'; }
+function fmtNm(m){ return (m/1852).toFixed(m>=185200?0:1)+' nm'; }
+function removeEnt(ds,e){ if(e){ try{ ds.entities.remove(e); }catch(_){} } }
+function toast(msg){ var t=$('#toast'); if(!t) return; t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._t); t._t=setTimeout(function(){ t.classList.remove('show'); },3600); }
+function staticLabel(text, off){ return { text:text, font:'600 11px "JetBrains Mono", ui-monospace, monospace',
+  fillColor:Ccss('#FFE08A'), outlineColor:Ccss(C_DARK), outlineWidth:3, style:Cesium.LabelStyle.FILL_AND_OUTLINE,
+  showBackground:true, backgroundColor:Ccss('#05070A',0.72), pixelOffset:off||new Cesium.Cartesian2(0,-12),
+  disableDepthTestDistance:Number.POSITIVE_INFINITY }; }
+
+function toolStatus(){ return toolMode==='ruler'?'RULER — click points; right-click / Enter to finish':
+  toolMode==='ring'?'RANGE RING — click centre, then click to set the radius':
+  toolMode==='geofence'?'GEOFENCE — click centre, then click to set the radius':
+  ('ready · '+(HOSTED?'proxied feeds':'direct feeds')); }
+function setTool(mode){
+  if(draft) finishDraft(true);
+  toolMode=(toolMode===mode)?null:mode;
+  document.body.classList.toggle('tool-active', !!toolMode);
+  $$('#tools button[data-tool]').forEach(function(b){ b.classList.toggle('on', b.dataset.tool===toolMode); });
+  $('#status').textContent=toolStatus();
+}
+function draftRadius(){ if(!draft||!draft.centerCarto||!mouseCart) return 0.1; return Math.max(0.1, distM(draft.centerCarto,cOf(mouseCart))); }
+function rulerTotal(pts){ var t=0; for(var i=1;i<pts.length;i++) t+=distM(cOf(pts[i-1]),cOf(pts[i])); return t; }
+function rulerTip(){ if(!draft||!draft.pts.length||!mouseCart) return '';
+  var last=draft.pts[draft.pts.length-1], mc=cOf(mouseCart), lc=cOf(last);
+  var leg=distM(lc,mc), brg=bearingOf(lc,mc), tot=rulerTotal(draft.pts)+leg;
+  return fmtDist(leg)+' · '+Math.round(brg)+'° · Σ '+fmtDist(tot)+' ('+fmtNm(tot)+')'; }
+function toolClick(pos){
+  var cart=pickGlobe(pos); if(!cart) return;                 // clicked off the globe
+  if(toolMode==='ruler'){
+    if(!draft){ draft={type:'ruler', pts:[], dots:[]};
+      draft.rubber=measureDS.entities.add({ polyline:{ positions:new Cesium.CallbackProperty(function(){
+        var arr=draft?draft.pts.slice():[]; if(mouseCart) arr=arr.concat([mouseCart]); return arr.length>=2?arr:[]; },false),
+        width:2, arcType:Cesium.ArcType.GEODESIC, material:Ccss(C_AMBER,0.95) } });
+    }
+    draft.pts.push(cart);
+    draft.dots.push(measureDS.entities.add({ position:cart,
+      point:{ pixelSize:5, color:Ccss(C_AMBER), outlineColor:Ccss(C_DARK,0.7), outlineWidth:1, disableDepthTestDistance:0 } }));
+  } else {                                                    // ring | geofence
+    if(!draft) draft={type:toolMode, center:null};
+    if(!draft.center){
+      draft.center=cart; draft.centerCarto=cOf(cart);
+      draft.dot=measureDS.entities.add({ position:cart,
+        point:{ pixelSize:5, color:Ccss(C_AMBER), outlineColor:Ccss(C_DARK,0.7), outlineWidth:1, disableDepthTestDistance:0 } });
+      draft.rubber=measureDS.entities.add({ position:cart, ellipse:{
+        semiMajorAxis:new Cesium.CallbackProperty(draftRadius,false), semiMinorAxis:new Cesium.CallbackProperty(draftRadius,false),
+        material:Ccss(C_AMBER,0.06), outline:true, outlineColor:Ccss(C_AMBER,0.9), outlineWidth:2, height:0 } });
+    } else {
+      var r=distM(draft.centerCarto, cOf(cart)); if(r<10){ return; }
+      commitRadial(draft, r); draft=null; $('#status').textContent=toolStatus();
+    }
+  }
+}
+function commitRadial(d, r){
+  removeEnt(measureDS, d.rubber);
+  if(d.type!=='geofence'){                                    // range ring: 3 concentric rings + label
+    [0.25,0.5,1].forEach(function(f,i){
+      measureDS.entities.add({ position:d.center, ellipse:{ semiMajorAxis:r*f, semiMinorAxis:r*f,
+        material:Ccss(C_AMBER, i===2?0.04:0.0), outline:true, outlineColor:Ccss(C_AMBER, i===2?0.9:0.4),
+        outlineWidth:i===2?2:1, height:0 } }); });
+    measureDS.entities.add({ position:d.center, label:staticLabel(fmtDist(r)+'  ('+fmtNm(r)+')') });
+    toast('Range ring · '+fmtDist(r)+' radius');
+  } else {                                                    // geofence: watched zone
+    var name='GEOFENCE '+(++gfSeq);
+    geofenceDS.entities.add({ position:d.center, ellipse:{ semiMajorAxis:r, semiMinorAxis:r,
+      material:Ccss(C_AMBER,0.08), outline:true, outlineColor:Ccss(C_AMBER,0.9), outlineWidth:2, height:0 } });
+    var lbl=geofenceDS.entities.add({ position:d.center,
+      label:staticLabel(name+'  ·  0 inside', new Cesium.Cartesian2(0,-14)) });
+    lbl.label.fillColor=Ccss(C_AMBER);
+    geofences.push({ name:name, center:d.center, centerCarto:d.centerCarto, radius:r, entity:lbl, inside:{}, count:0 });
+    toast('Geofence set · '+fmtDist(r)+' radius — watching aircraft');
+    checkGeofences();
+  }
+}
+function finishDraft(cancel){
+  if(!draft) return;
+  removeEnt(measureDS, draft.rubber); removeEnt(measureDS, draft.dot);
+  if(draft.type==='ruler'){
+    if(cancel || draft.pts.length<2){ (draft.dots||[]).forEach(function(e){ removeEnt(measureDS,e); }); }
+    else {
+      var pts=draft.pts.slice();
+      measureDS.entities.add({ polyline:{ positions:pts, width:2, arcType:Cesium.ArcType.GEODESIC, material:Ccss(C_AMBER,0.9) } });
+      var tot=rulerTotal(pts);
+      measureDS.entities.add({ position:pts[pts.length-1],
+        label:staticLabel('Σ '+fmtDist(tot)+'  ('+fmtNm(tot)+')', new Cesium.Cartesian2(12,-12)) });
+    }
+  }
+  draft=null; if(toolMode) $('#status').textContent=toolStatus();
+}
+function clearTools(){
+  if(draft) finishDraft(true);
+  if(measureDS) measureDS.entities.removeAll();
+  if(geofenceDS) geofenceDS.entities.removeAll();
+  if(gfHLDS) gfHLDS.entities.removeAll();
+  geofences=[]; gfSeq=0; toast('Cleared measurements & geofences');
+}
+/* geofence monitoring: which aircraft are inside each zone (with new-entrant alerts) */
+function checkGeofences(){
+  if(!gfHLDS) return; gfHLDS.entities.removeAll();
+  if(!geofences.length || !DS.air) return;
+  var t=viewer.clock.currentTime, ac=DS.air.entities.values;
+  geofences.forEach(function(gf){
+    var insideNow={}, cnt=0, newly=[];
+    ac.forEach(function(e){
+      if(!e.position||!e.properties||!e.properties.te_layer) return;
+      var lyr=e.properties.te_layer.getValue?e.properties.te_layer.getValue():e.properties.te_layer;
+      if(lyr!=='air') return;
+      var p=e.position.getValue(t); if(!p) return;
+      if(distM(gf.centerCarto, cOf(p))>gf.radius) return;
+      var te=e.properties.te&&e.properties.te.getValue&&e.properties.te.getValue(), a=te&&te.a;
+      var id=(a&&(a.hex||a.flight))||String(e.id), nm=(a&&((a.flight||'').trim()||a.hex))||id;
+      insideNow[id]=nm; cnt++; if(!gf.inside[id]) newly.push(nm);
+      gfHLDS.entities.add({ position:p, point:{ pixelSize:16, color:Ccss(C_RED,0.0),
+        outlineColor:Ccss(C_RED,0.9), outlineWidth:2, disableDepthTestDistance:Number.POSITIVE_INFINITY } });
+    });
+    gf.inside=insideNow; gf.count=cnt;
+    if(gf.entity&&gf.entity.label){ gf.entity.label.text=gf.name+'  ·  '+cnt+' inside';
+      gf.entity.label.fillColor=Ccss(cnt?C_RED:C_AMBER); }
+    if(newly.length){ toast('▲ '+newly.length+' entered '+gf.name+': '+newly.slice(0,3).join(', ')+(newly.length>3?'…':'')); }
+  });
+}
+
+/* ---- Events list (left dock, Events tab) ---- */
+var EVENT_LAYERS=['air','quake','hazard','cyclone','gdacs','floods','launch','fireball','metar'];
+var EVENT_META={ air:['AIR','#F2A900'], quake:['SEIS','#37E0A0'], hazard:['HAZ','#FF7A1A'], cyclone:['TC','#39C6E6'],
+  gdacs:['GDACS','#F2A900'], floods:['FLOOD','#5B8CFF'], launch:['LNCH','#9B8CFF'], fireball:['BOLIDE','#FFB454'], metar:['METAR','#37E0A0'] };
+function eventRowData(k, te){
+  var a,L,m,p;
+  if(k==='air'){ a=te.a||{}; return {title:((a.flight||'').trim()||a.hex||a.r||'UNKNOWN'),
+    sub:(a.t||'')+(a.alt_baro!=null?(' · '+(a.alt_baro==='ground'?'GND':a.alt_baro+' ft')):'')}; }
+  if(k==='quake'){ return {title:'M '+(te.mag!=null?te.mag.toFixed(1):'—'), sub:(te.f&&te.f.properties&&te.f.properties.place)||''}; }
+  if(k==='hazard'){ return {title:(te.ev&&te.ev.title)||'Event', sub:te.cat||''}; }
+  if(k==='cyclone'){ return {title:(te.st&&te.st.name)||'Cyclone', sub:tcCat(te.kt==null?0:te.kt)}; }
+  if(k==='gdacs'){ p=te.props||{}; return {title:p.name||GDACS_TYPE[p.eventtype]||'Alert', sub:(GDACS_TYPE[p.eventtype]||'')+(p.alertlevel?(' · '+p.alertlevel):'')}; }
+  if(k==='floods'){ return {title:floodSevName(te.lvl), sub:(te.geo&&te.geo.label)||''}; }
+  if(k==='launch'){ L=te.L||{}; return {title:L.name||'Launch', sub:(L.launch_service_provider&&L.launch_service_provider.name)||''}; }
+  if(k==='fireball'){ return {title:(isFinite(te.impact)?te.impact+' kt':'Fireball'), sub:te.when?new Date(te.when).toISOString().slice(0,10):''}; }
+  if(k==='metar'){ m=te.m||{}; return {title:m.icaoId||'METAR', sub:(m.fltCat||'')+(m.name?(' · '+m.name):'')}; }
+  return {title:k, sub:''};
+}
+function renderEvents(){
+  var body=$('#eventBody'); if(!body) return;
+  var q=($('#laySearch').value||'').toLowerCase(); body.innerHTML=''; var total=0;
+  EVENT_LAYERS.forEach(function(k){
+    var ds=DS[k]; if(!ds) return; var meta=EVENT_META[k]||[k,'#7C8794']; var rows=[];
+    ds.entities.values.forEach(function(e){
+      if(!e.properties||!e.properties.te_layer) return;
+      var lyr=e.properties.te_layer.getValue?e.properties.te_layer.getValue():e.properties.te_layer;
+      if(lyr!==k) return;
+      var te=e.properties.te&&e.properties.te.getValue&&e.properties.te.getValue(); if(!te) return;
+      var d=eventRowData(k,te);
+      if(q && (d.title+' '+d.sub+' '+meta[0]).toLowerCase().indexOf(q)<0) return;
+      rows.push({d:d, e:e});
+    });
+    if(!rows.length) return; total+=rows.length;
+    var gh=el('div','lgroup'); gh.appendChild(el('div','gh',meta[0]+' · '+rows.length)); body.appendChild(gh);
+    rows.slice(0,120).forEach(function(r){
+      var row=el('div','erow');
+      var dot=el('span','edot'); dot.style.background=meta[1]; row.appendChild(dot);
+      var mt=el('div','emeta'); mt.appendChild(el('div','etitle',r.d.title)); mt.appendChild(el('div','esub',r.d.sub||'')); row.appendChild(mt);
+      row.onclick=function(){ flyToEntity(r.e); }; body.appendChild(row);
+    });
+    if(rows.length>120) body.appendChild(el('div','emore','+'+(rows.length-120)+' more…'));
+  });
+  if(!total) body.appendChild(el('div','eempty','No live events in the enabled layers yet. Turn layers on, or give the feeds a moment to load.'));
+  if(leftTab==='events') $('#layChip').textContent=total+' EVENTS';
+}
+function setLeftTab(tab){
+  leftTab=tab;
+  $('#tabLayers').classList.toggle('on',tab==='layers'); $('#tabEvents').classList.toggle('on',tab==='events');
+  $('#layerBody').style.display = tab==='layers'?'':'none';
+  $('#eventBody').style.display = tab==='events'?'':'none';
+  $('#laySearch').placeholder = tab==='layers'?'Filter layers…':'Filter events…';
+  if(tab==='events') renderEvents(); else renderLayers();
+}
+
+/* ---- Shareable views (camera + active layers in the URL hash) ---- */
+function buildShareURL(){
+  var c=camera.positionCartographic;
+  var lon=Cesium.Math.toDegrees(c.longitude).toFixed(3), lat=Cesium.Math.toDegrees(c.latitude).toFixed(3), h=Math.round(c.height);
+  var head=Math.round(Cesium.Math.toDegrees(camera.heading)), pit=Math.round(Cesium.Math.toDegrees(camera.pitch));
+  var on=Object.keys(LAYERS).filter(function(k){return LAYERS[k].on;}).join(',');
+  var base=(location.origin&&location.origin!=='null')?(location.origin+location.pathname):location.pathname;
+  return base+'#v='+lon+','+lat+','+h+','+head+','+pit+'&l='+on;
+}
+function shareView(){
+  if(!camera){ toast('View not ready yet'); return; }
+  var url=buildShareURL();
+  try{ location.hash=url.split('#')[1]||''; }catch(_){}
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).then(function(){ toast('View link copied to clipboard'); },
+      function(){ toast('View link is in the address bar'); });
+  } else { toast('View link is in the address bar'); }
+}
+function restoreView(){
+  var h=location.hash||''; if(h.indexOf('v=')<0 && h.indexOf('l=')<0) return;
+  var params={}; h.replace(/^#/,'').split('&').forEach(function(kv){ var i=kv.indexOf('='); if(i>0) params[kv.slice(0,i)]=decodeURIComponent(kv.slice(i+1)); });
+  if(params.l!=null){ var on={}; params.l.split(',').forEach(function(k){ if(k) on[k]=1; });
+    Object.keys(LAYERS).forEach(function(k){ LAYERS[k].on=!!on[k]; }); applyVisibility(); renderLayers(); }
+  if(params.v){ var p=params.v.split(',').map(Number);
+    if(p.length>=3 && isFinite(p[0]) && isFinite(p[1])){
+      camera.setView({ destination:Cesium.Cartesian3.fromDegrees(p[0],p[1],p[2]||17000000),
+        orientation:{ heading:Cesium.Math.toRadians(p[3]||0), pitch:Cesium.Math.toRadians(isFinite(p[4])?p[4]:-90), roll:0 } }); } }
 }
 
 /* =====================================================================
@@ -2205,6 +2489,7 @@ loadCesium().then(function(){
   return loadH3(); // non-fatal: only the GPS-interference layer depends on it
 }).then(function(){
   initViewer(); setupHUD(); wireUI(); refreshHealth(); renderLayers();
+  restoreView();                                                   // apply a shared #v=…&l=… view if present
   $('#boot').classList.add('gone');
   $('#status').textContent='ready · '+(HOSTED?'proxied feeds':'direct feeds');
   // kick off data
@@ -2234,6 +2519,8 @@ loadCesium().then(function(){
   setInterval(loadFireballs,1800000);                              // CNEOS fireballs sporadic → poll every 30m
   setInterval(loadGPSJam,21600000);                                // GPSJam is a daily file → refresh every 6h
   setInterval(function(){ if(lazyLoaded.metar) loadMETAR(); },600000); // METAR hourly → refresh every 10m when shown
+  setInterval(checkGeofences,5000);                                // re-check watch zones every 5s
+  setInterval(function(){ if(leftTab==='events') renderEvents(); },5000); // keep the events list fresh
 }).catch(function(err){
   bootError('ThirdEye could not load the 3D globe engine (CesiumJS) from its CDNs.<br><br>'+
     'This is almost always a network/blocked-CDN issue. When you host this on Netlify or open it on a normal connection it will load.<br><br><span class="mono" style="font-size:10px;color:#4C5661">'+esc(String(err&&err.message||err))+'</span>');
@@ -2241,7 +2528,8 @@ loadCesium().then(function(){
 
 /* expose a couple of handles for the console / future wiring */
 window.ThirdEye={ get viewer(){return viewer;}, LAYERS:LAYERS, setSim:setSim, setMode:setMode,
-  _renderLayers:renderLayers, _refreshHealth:refreshHealth };
+  _renderLayers:renderLayers, _refreshHealth:refreshHealth,
+  setTool:setTool, clearTools:clearTools, setLeftTab:setLeftTab, shareView:shareView };
 })();
 </script>
 </body>
