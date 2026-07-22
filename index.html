@@ -316,6 +316,32 @@ body.tool-active #cesiumContainer canvas{cursor:crosshair}
 .esub{font-size:9.5px;color:var(--txt-mute);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 .emore,.eempty{padding:8px 11px;font-size:10px;color:var(--txt-mute);font-family:var(--mono);line-height:1.6}
 
+/* ---------------- info button + guide/legend modal ---------------- */
+#infoBtn{width:26px;height:26px;flex:none;border:1px solid var(--line);border-radius:50%;color:var(--txt-dim);
+  font-size:13px;font-weight:700;line-height:1;display:grid;place-items:center;background:rgba(0,0,0,.2)}
+#infoBtn:hover{color:var(--accent);border-color:rgba(242,169,0,.45)}
+#info{position:fixed;inset:0;z-index:70;display:none;align-items:flex-start;justify-content:center;
+  background:rgba(5,7,10,.55);backdrop-filter:blur(3px)}
+#info.show{display:flex}
+#info .box{margin-top:9vh;width:min(560px,92vw);max-height:80vh;display:flex;flex-direction:column;
+  background:#0f151c;border:1px solid var(--line-2);box-shadow:0 30px 90px rgba(0,0,0,.7)}
+.info-cap{display:flex;align-items:center;justify-content:space-between;padding:11px 13px;border-bottom:1px solid var(--line)}
+.info-tabs{display:flex;gap:3px}
+.it{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--txt-dim);padding:5px 11px;border:1px solid transparent;border-radius:3px}
+.it:hover{color:var(--txt)}
+.it.on{color:var(--accent);border-color:rgba(242,169,0,.4);background:rgba(242,169,0,.07)}
+.info-body{overflow:auto;padding:14px 16px 18px}
+.lgd-h{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim);font-weight:600;
+  margin:16px 0 7px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+.lgd-h:first-child{margin-top:0}
+.lgd-note{font-size:11.5px;color:var(--txt-dim);line-height:1.6;margin-bottom:6px}
+.lgd-row{font-size:11.5px;color:var(--txt);line-height:1.7;padding:2px 0}
+.lgd-row b{color:var(--white);font-weight:600}
+.lgd-sw{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:middle;margin-right:8px;box-shadow:0 0 5px rgba(0,0,0,.4)}
+.lgd-sub{font-size:10.5px;color:var(--txt-mute);font-family:var(--mono);margin:9px 0 3px}
+.lgd-scale{display:flex;flex-wrap:wrap;gap:5px 14px;margin-bottom:2px}
+.lgd-chip{font-size:11px;color:var(--txt);display:flex;align-items:center}
+
 /* ---------------- toast ---------------- */
 #toast{position:fixed;left:50%;bottom:92px;transform:translateX(-50%) translateY(8px);z-index:40;
   background:rgba(13,17,23,.96);border:1px solid var(--line-2);color:var(--txt);font-size:11.5px;
@@ -358,6 +384,7 @@ body.tool-active #cesiumContainer canvas{cursor:crosshair}
     </div>
     <div class="spacer"></div>
     <div id="health"></div>
+    <button id="infoBtn" title="Guide &amp; legend">?</button>
     <button id="cmdk"><span>Search / jump</span><kbd>⌘K</kbd></button>
     <div id="clock"><div class="z" id="clkZ">--:--:--Z</div><div class="d" id="clkD">--- ---- ----</div></div>
   </div>
@@ -436,6 +463,15 @@ body.tool-active #cesiumContainer canvas{cursor:crosshair}
       <span class="k">ESC</span>
     </div>
     <div class="res" id="palRes"></div>
+  </div></div>
+
+  <!-- guide + legend modal -->
+  <div id="info"><div class="box panel">
+    <div class="info-cap">
+      <div class="info-tabs"><button id="infoTabGuide" class="it on">Guide</button><button id="infoTabLegend" class="it">Legend</button></div>
+      <button class="x" id="infoClose">✕</button>
+    </div>
+    <div class="info-body" id="infoBody"></div>
   </div></div>
 
   <!-- boot splash -->
@@ -2243,6 +2279,10 @@ function wireUI(){
   $$('#tools button[data-tool]').forEach(function(b){ b.onclick=function(){ setTool(b.dataset.tool); }; });
   $('#toolShare').onclick=shareView;
   $('#toolClear').onclick=clearTools;
+  $('#infoBtn').onclick=function(){ openInfo('guide'); };
+  $('#infoClose').onclick=closeInfo;
+  $('#infoTabGuide').onclick=function(){ renderInfo('guide'); };
+  $('#infoTabLegend').onclick=function(){ renderInfo('legend'); };
   $$('#vm button[data-mode]').forEach(function(b){ b.onclick=function(){
     if(b.dataset.mode==='reticle') setReticle(!reticleOn); else setMode(b.dataset.mode); }; });
   $$('#bl button').forEach(function(b){ b.onclick=function(){ setBasemap(b.dataset.base); }; });
@@ -2252,6 +2292,7 @@ function wireUI(){
   $('#palInput').oninput=function(){ renderPalette(this.value); };
   document.addEventListener('keydown',function(e){
     if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){ e.preventDefault(); $('#palette').classList.contains('show')?closePalette():openPalette(); return; }
+    if($('#info').classList.contains('show')){ if(e.key==='Escape') closeInfo(); return; }
     if($('#palette').classList.contains('show')){
       if(e.key==='Escape'){ closePalette(); }
       else if(e.key==='ArrowDown'){ e.preventDefault(); movePal(1); }
@@ -2479,6 +2520,98 @@ function restoreView(){
 }
 
 /* =====================================================================
+   Consistency: anchor ground markers to the globe (occlude far side)
+   Sets depth-testing on point/billboard markers and lifts height-0 ones a
+   touch to avoid z-fighting, so markers hide behind the earth when rotated
+   instead of floating over the disc. Idempotent (per-entity _anchored flag).
+   ===================================================================== */
+function anchorEntities(ds, lift){
+  if(!ds) return; var t=viewer.clock.currentTime, vals=ds.entities.values;
+  for(var i=0;i<vals.length;i++){ var e=vals[i]; if(e._anchored) continue; e._anchored=true;
+    if(e.billboard) e.billboard.disableDepthTestDistance=0;
+    if(e.point) e.point.disableDepthTestDistance=0;
+    if(lift && (e.billboard||e.point) && e.position && e.position.getValue){
+      var p=e.position.getValue(t); if(!p) continue;
+      var carto=Cesium.Cartographic.fromCartesian(p);
+      if(carto.height<lift){ carto.height=lift; e.position=Cesium.Cartographic.toCartesian(carto); }
+    }
+  }
+}
+var ANCHOR_LAYERS=['quake','hazard','cyclone','floods','launch','aurora','fireball','metar','cables'];
+function anchorAllData(){ if(!viewer) return; ANCHOR_LAYERS.forEach(function(k){ anchorEntities(DS[k],8000); }); }
+
+/* =====================================================================
+   Guide + Legend (info modal) — the symbology & honesty key
+   ===================================================================== */
+var infoTab='guide';
+var LEGEND_EVIDENCE=[
+  ['DIRECT OBSERVATION','#37E0A0','A live sensor hit (e.g. ADS-B). Strongest evidence.'],
+  ['OFFICIAL REPORT','#9B8CFF','From an official body — USGS, NHC, NASA, GDACS, EA, NOAA.'],
+  ['MODEL OUTPUT','#39C6E6','Computed / propagated (SGP4 orbits, OVATION aurora). Not a live fix.'],
+  ['OBSERVED','#5B8CFF','Aggregated observation (composite weather radar).'],
+  ['INFERRED','#F2A900','Deduced from behaviour (GPS interference from ADS-B). An indicator.'],
+  ['REFERENCE','#39C6E6','Static infrastructure geometry (submarine cables).']
+];
+var LEGEND_SCALES=[
+  ['Earthquake magnitude',[['<2.5','#39C6E6'],['2.5–4','#37E0A0'],['4–5','#F2A900'],['≥5','#FF5964']]],
+  ['Flight category (METAR)',[['VFR','#37E0A0'],['MVFR','#39C6E6'],['IFR','#FF5964'],['LIFR','#E06AFF']]],
+  ['GDACS disaster alert',[['Green','#37E0A0'],['Orange','#FF7A1A'],['Red','#FF5964']]],
+  ['GPS interference',[['Medium 2–10%','#F2A900'],['High ≥10%','#FF5964']]],
+  ['UK flood severity',[['Alert','#F2A900'],['Warning','#FF7A1A'],['Severe','#FF5964']]],
+  ['Cyclone strength',[['Storm','#F2A900'],['Cat 1–2','#FF7A1A'],['Cat 3+','#FF5964']]]
+];
+var LEGEND_SYMBOLS=[
+  ['Chevron','#F2A900','Military aircraft (ADS-B), rotated to its heading'],
+  ['Diamond','#39C6E6','Satellite — stations / navigation / brightest'],
+  ['Small dot','#E8EEF4','Constellation satellite (Starlink / GNSS / geo belt)'],
+  ['Ring + tick','#9B8CFF','Rocket launch pad'],
+  ['Spiral','#39C6E6','Tropical cyclone (with a heading arrow)'],
+  ['Triangle','#FF7A1A','Natural hazard (NASA EONET)'],
+  ['Hexagon','#F2A900','GDACS disaster alert'],
+  ['Teardrop','#5B8CFF','UK flood warning'],
+  ['Dot','#37E0A0','Earthquake (size = magnitude)'],
+  ['Glow dot','#FFB454','Fireball / bolide (size = energy)'],
+  ['Filled hex cell','#F2A900','GPS-interference zone (H3)'],
+  ['Line','#39C6E6','Submarine cable + landing points']
+];
+function lgSw(c){ return '<span class="lgd-sw" style="background:'+c+'"></span>'; }
+function legendHTML(){
+  var h='<div class="lgd-h">Evidence class</div><div class="lgd-note">Every object shows how we know it — the core honesty rule.</div>';
+  LEGEND_EVIDENCE.forEach(function(r){ h+='<div class="lgd-row">'+lgSw(r[1])+'<b>'+r[0]+'</b> — '+r[2]+'</div>'; });
+  h+='<div class="lgd-h">Colour scales</div>';
+  LEGEND_SCALES.forEach(function(s){ h+='<div class="lgd-sub">'+s[0]+'</div><div class="lgd-scale">'+
+    s[1].map(function(x){ return '<span class="lgd-chip">'+lgSw(x[1])+x[0]+'</span>'; }).join('')+'</div>'; });
+  h+='<div class="lgd-h">Shapes</div>';
+  LEGEND_SYMBOLS.forEach(function(r){ h+='<div class="lgd-row">'+lgSw(r[1])+'<b>'+r[0]+'</b> — '+r[2]+'</div>'; });
+  h+='<div class="lgd-note" style="margin-top:14px">View themes (night-vision, thermal) are cosmetic post-processing — a visual style, never sensor data — and are always labelled as such on screen.</div>';
+  return h;
+}
+function guideHTML(){
+  return '<div class="lgd-note">ThirdEye is a calm, tactical globe that fuses live public data feeds into one picture. It follows one rule above all: show where every piece of data comes from and how fresh it is — and never dress up a guess as an observation.</div>'+
+  '<div class="lgd-h">Getting around</div>'+
+  '<div class="lgd-row">Click any marker for its intel panel — evidence class, freshness and source.</div>'+
+  '<div class="lgd-row"><b>Layers</b> tab (left): toggle any of the '+Object.keys(LAYERS).length+' feeds, solo one, or fade it.</div>'+
+  '<div class="lgd-row"><b>Events</b> tab (left): one searchable list of everything live — click a row to fly to it.</div>'+
+  '<div class="lgd-row"><b>⌘K / Ctrl-K</b>: jump to a place, toggle a layer, or search a callsign / NORAD ID.</div>'+
+  '<div class="lgd-row"><b>Workspaces</b> (top) and <b>basemaps</b> (bottom-left) reframe the view.</div>'+
+  '<div class="lgd-h">Tools (bottom centre)</div>'+
+  '<div class="lgd-row"><b>Ruler</b> — click points for great-circle distance + bearing; right-click / Enter to finish.</div>'+
+  '<div class="lgd-row"><b>Range</b> — click a centre, then the edge, to drop range rings.</div>'+
+  '<div class="lgd-row"><b>Geofence</b> — draw a zone; it counts aircraft inside and alerts when a new one enters.</div>'+
+  '<div class="lgd-row"><b>Share</b> — copies a link that reopens this exact view and active layers.</div>'+
+  '<div class="lgd-h">Honesty &amp; scope</div>'+
+  '<div class="lgd-note">A prototype for non-commercial use; every feed is public and key-free (see the SOURCES panel). Positions marked MODEL OUTPUT — satellites especially — are computed, not tracked, and drift as their data ages. Some layers are regional (NHC covers the Atlantic/Pacific; UK floods cover England). Live ship &amp; aircraft streams, history playback and the analyst assistant arrive with the backend.</div>';
+}
+function renderInfo(tab){
+  infoTab=tab||infoTab||'guide';
+  $('#infoTabGuide').classList.toggle('on',infoTab==='guide');
+  $('#infoTabLegend').classList.toggle('on',infoTab==='legend');
+  $('#infoBody').innerHTML = infoTab==='guide'?guideHTML():legendHTML();
+}
+function openInfo(tab){ renderInfo(tab); $('#info').classList.add('show'); }
+function closeInfo(){ $('#info').classList.remove('show'); }
+
+/* =====================================================================
    Boot sequence
    ===================================================================== */
 setInterval(tickClock,1000); tickClock();
@@ -2521,6 +2654,7 @@ loadCesium().then(function(){
   setInterval(function(){ if(lazyLoaded.metar) loadMETAR(); },600000); // METAR hourly → refresh every 10m when shown
   setInterval(checkGeofences,5000);                                // re-check watch zones every 5s
   setInterval(function(){ if(leftTab==='events') renderEvents(); },5000); // keep the events list fresh
+  setInterval(anchorAllData,1500);                                 // occlude new markers behind the globe
 }).catch(function(err){
   bootError('ThirdEye could not load the 3D globe engine (CesiumJS) from its CDNs.<br><br>'+
     'This is almost always a network/blocked-CDN issue. When you host this on Netlify or open it on a normal connection it will load.<br><br><span class="mono" style="font-size:10px;color:#4C5661">'+esc(String(err&&err.message||err))+'</span>');
@@ -2529,7 +2663,8 @@ loadCesium().then(function(){
 /* expose a couple of handles for the console / future wiring */
 window.ThirdEye={ get viewer(){return viewer;}, LAYERS:LAYERS, setSim:setSim, setMode:setMode,
   _renderLayers:renderLayers, _refreshHealth:refreshHealth,
-  setTool:setTool, clearTools:clearTools, setLeftTab:setLeftTab, shareView:shareView };
+  setTool:setTool, clearTools:clearTools, setLeftTab:setLeftTab, shareView:shareView,
+  openInfo:openInfo, closeInfo:closeInfo, renderInfo:renderInfo };
 })();
 </script>
 </body>
