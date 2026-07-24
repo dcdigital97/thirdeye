@@ -23,6 +23,7 @@
                  precip radar RainViewer composite          (observed raster)
                  UK floods    Environment Agency RT          (official flood warning)
      AIR         military ac  airplanes.live /v2/mil        (direct ADS-B observation)
+                 civil ac     airplanes.live (via backend)   (direct ADS-B observation)
                  airport wx   NOAA AWC METAR                (official station obs)
      MARITIME    ship traffic AISStream (via backend)        (direct AIS observation)
      SIGNALS     GPS interfer GPSJam (ADS-B derived)         (inferred, daily aggregate)
@@ -569,7 +570,10 @@ var SOURCES = {
                    cors:'proxied when hosted', evidence:'OFFICIAL REPORT (station observation)' },
   ais:           { name:'AIS ship traffic (AISStream)', org:'AISStream', url:'https://aisstream.io',
                    licence:'Free tier, non-commercial; BETA (no SLA)', rate:'Live WebSocket push', auth:'server-held key (never in browser)',
-                   cors:'via ThirdEye backend over wss', evidence:'DIRECT OBSERVATION (AIS transponder)' }
+                   cors:'via ThirdEye backend over wss', evidence:'DIRECT OBSERVATION (AIS transponder)' },
+  adsbciv:       { name:'Civil aircraft (airplanes.live)', org:'airplanes.live community', url:'https://airplanes.live',
+                   licence:'Free, non-commercial; attribution', rate:'point query ~every 10s (backend polls once, fans out)', auth:'none',
+                   cors:'via ThirdEye backend over wss', evidence:'DIRECT OBSERVATION (ADS-B, community)' }
 };
 function fetchFeed(spec){
   var order = HOSTED ? [spec.proxy, spec.direct] : [spec.direct, spec.proxy];
@@ -711,6 +715,7 @@ function floodIcon(color){ return _dropIcons[color]||(_dropIcons[color]=dropIcon
 function shipIcon(color){ return _shipIcons[color]||(_shipIcons[color]=shipShape(color)); }
 var ICO = {
   air: chevronIcon('#F2A900'), airHot: chevronIcon('#FF5964'), airDim: chevronIcon('#D9A93B'),
+  civ: chevronIcon('#8FD0E6'),
   sat: diamondIcon('#39C6E6'), satSel: diamondIcon('#F2A900'),
   launch: launchIcon('#9B8CFF'), launchSel: launchIcon('#F2A900')
 };
@@ -788,7 +793,11 @@ var LAYERS = {
   ships: { id:'ships', group:'MARITIME', name:'Ship traffic', sym:'⛴', color:'#37E0A0',
            on:false, opacity:1, count:0, status:'idle', srcKey:'ais', type:'stream',
            evidence:'DIRECT OBSERVATION', source:'AISStream · live AIS via ThirdEye backend',
-           attr:'AISStream (live AIS)' }
+           attr:'AISStream (live AIS)' },
+  civair:{ id:'civair', group:'AIR', name:'Civil aircraft', sym:'▲', color:'#8FD0E6',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'adsbciv', type:'stream',
+           evidence:'DIRECT OBSERVATION', source:'airplanes.live · ADS-B via ThirdEye backend',
+           attr:'airplanes.live (ADS-B)' }
 };
 // link existing layers to their source-registry entries
 LAYERS.sat.srcKey='celestrak'; LAYERS.quake.srcKey='usgs_quakes';
@@ -920,12 +929,14 @@ function initViewer(){
   DS.metar=new Cesium.CustomDataSource('metar'); DS.metar.show=false;
   DS.cables=new Cesium.CustomDataSource('cables'); DS.cables.show=false;
   DS.ships=new Cesium.CustomDataSource('ships'); DS.ships.show=false;
+  DS.civair=new Cesium.CustomDataSource('civair'); DS.civair.show=false;
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
   viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch); viewer.dataSources.add(DS.aurora);
   viewer.dataSources.add(DS.cyclone); viewer.dataSources.add(DS.gdacs);
   viewer.dataSources.add(DS.floods); viewer.dataSources.add(DS.fireball); viewer.dataSources.add(DS.gpsjam);
   viewer.dataSources.add(DS.starlink); viewer.dataSources.add(DS.gnss); viewer.dataSources.add(DS.geo);
-  viewer.dataSources.add(DS.metar); viewer.dataSources.add(DS.cables); viewer.dataSources.add(DS.ships);
+  viewer.dataSources.add(DS.metar); viewer.dataSources.add(DS.cables);
+  viewer.dataSources.add(DS.ships); viewer.dataSources.add(DS.civair);
   // tool overlays (measurements, geofences, geofence highlights) — always on top of layers
   measureDS=new Cesium.CustomDataSource('measure'); geofenceDS=new Cesium.CustomDataSource('geofence'); gfHLDS=new Cesium.CustomDataSource('gfhl');
   viewer.dataSources.add(measureDS); viewer.dataSources.add(geofenceDS); viewer.dataSources.add(gfHLDS);
@@ -1834,39 +1845,50 @@ var SHIP_LABEL={ cargo:'Cargo', tanker:'Tanker', passenger:'Passenger', highspee
 var SHIP_NAV={ 0:'Under way (engine)', 1:'At anchor', 2:'Not under command', 3:'Restricted manoeuvrability',
   4:'Constrained by draught', 5:'Moored', 6:'Aground', 7:'Fishing', 8:'Under way (sailing)', 15:'Undefined' };
 function shipColor(cat){ return SHIP_COLORS[cat]||SHIP_COLORS.other; }
-var shipsWS=null, shipsReconnect=null, shipViewportTimer=null;
-function shipsWsUrl(){ return BACKEND ? BACKEND.replace(/\/+$/,'').replace(/^http/,'ws')+'/stream' : ''; }
-function connectShips(){
-  if(!BACKEND){ LAYERS.ships.status='unavailable'; refreshHealth(); renderLayers(); return; }
-  if(shipsWS && (shipsWS.readyState===0||shipsWS.readyState===1)) return; // already connecting/open
-  LAYERS.ships.status='loading'; refreshHealth(); renderLayers();
-  var ws;
-  try{ ws=new WebSocket(shipsWsUrl()); }catch(e){ LAYERS.ships.status='unavailable'; refreshHealth(); renderLayers(); return; }
-  shipsWS=ws;
-  ws.onopen=function(){ sendShipViewport(); };
-  ws.onmessage=function(ev){ var msg; try{ msg=JSON.parse(ev.data); }catch(e){ return; }
-    if(msg.type==='ships'){ renderShips(msg.vessels||[]); }
-    else if(msg.type==='hello'){ if(msg.ais && msg.ais.connected===false && LAYERS.ships.count===0){ LAYERS.ships.status='degraded'; refreshHealth(); renderLayers(); } }
+/* ---- shared backend WebSocket stream (ships + civil aircraft) ---- */
+var backendWS=null, streamReconnect=null, streamViewportTimer=null;
+function backendWsUrl(){ return BACKEND ? BACKEND.replace(/\/+$/,'').replace(/^http/,'ws')+'/stream' : ''; }
+function streamWants(){ var w=[]; if(LAYERS.ships.on)w.push('ships'); if(LAYERS.civair.on)w.push('aircraft'); return w; }
+function streamActive(){ return !!BACKEND && (LAYERS.ships.on||LAYERS.civair.on); }
+function streamFail(){ if(LAYERS.ships.on)LAYERS.ships.status='unavailable'; if(LAYERS.civair.on)LAYERS.civair.status='unavailable'; refreshHealth(); renderLayers(); }
+function streamEnsure(){
+  if(!streamActive()){ streamClose(); return; }
+  if(backendWS && (backendWS.readyState===0||backendWS.readyState===1)){ sendStreamViewport(); return; } // reuse, resend want
+  if(LAYERS.ships.on && LAYERS.ships.status!=='live') LAYERS.ships.status='loading';
+  if(LAYERS.civair.on && LAYERS.civair.status!=='live') LAYERS.civair.status='loading';
+  refreshHealth(); renderLayers();
+  var ws; try{ ws=new WebSocket(backendWsUrl()); }catch(e){ streamFail(); return; }
+  backendWS=ws;
+  ws.onopen=function(){ sendStreamViewport(); };
+  ws.onmessage=function(ev){ var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
+    if(m.type==='ships'){ if(LAYERS.ships.on) renderShips(m.vessels||[]); }
+    else if(m.type==='aircraft'){ if(LAYERS.civair.on) renderCivAir(m.craft||[]); }
+    else if(m.type==='hello'){
+      if(LAYERS.ships.on && m.ais && m.ais.connected===false && LAYERS.ships.count===0){ LAYERS.ships.status='degraded'; }
+      if(LAYERS.civair.on && m.aircraft && m.aircraft.enabled===false && LAYERS.civair.count===0){ LAYERS.civair.status='degraded'; }
+      refreshHealth(); renderLayers();
+    }
   };
-  ws.onclose=function(){ if(shipsWS===ws) shipsWS=null;
-    if(LAYERS.ships.on){ LAYERS.ships.status='degraded'; refreshHealth(); renderLayers();
-      clearTimeout(shipsReconnect); shipsReconnect=setTimeout(connectShips, 4000); } };
+  ws.onclose=function(){ if(backendWS===ws) backendWS=null;
+    if(streamActive()){ if(LAYERS.ships.on)LAYERS.ships.status='degraded'; if(LAYERS.civair.on)LAYERS.civair.status='degraded';
+      refreshHealth(); renderLayers(); clearTimeout(streamReconnect); streamReconnect=setTimeout(streamEnsure,4000); } };
   ws.onerror=function(){ try{ ws.close(); }catch(e){} };
 }
-function disconnectShips(){
-  clearTimeout(shipsReconnect);
-  if(shipsWS){ var w=shipsWS; shipsWS=null; try{ w.onclose=null; w.close(); }catch(e){} }
-  DS.ships.entities.removeAll(); LAYERS.ships.count=0;
+function streamClose(){
+  clearTimeout(streamReconnect);
+  if(backendWS){ var w=backendWS; backendWS=null; try{ w.onclose=null; w.close(); }catch(e){} }
+  if(!LAYERS.ships.on){ DS.ships.entities.removeAll(); LAYERS.ships.count=0; }
+  if(!LAYERS.civair.on){ DS.civair.entities.removeAll(); LAYERS.civair.count=0; }
 }
-function sendShipViewport(){
-  if(!shipsWS || shipsWS.readyState!==1) return;
+function sendStreamViewport(){
+  if(!backendWS || backendWS.readyState!==1) return;
   var bbox, r=null; try{ r=camera.computeViewRectangle(); }catch(e){}
   if(r){ var w=Cesium.Math.toDegrees(r.west), s=Cesium.Math.toDegrees(r.south),
            e2=Cesium.Math.toDegrees(r.east), n=Cesium.Math.toDegrees(r.north);
     if(w>e2){ w=-180; e2=180; }                    // antimeridian wrap -> widen
     bbox=[w,s,e2,n];
   } else { bbox=[-180,-85,180,85]; }               // whole-globe fallback
-  try{ shipsWS.send(JSON.stringify({ type:'viewport', bbox:bbox })); }catch(e){}
+  try{ backendWS.send(JSON.stringify({ type:'viewport', bbox:bbox, want:streamWants() })); }catch(e){}
 }
 function renderShips(list){
   DS.ships.entities.removeAll();
@@ -1903,6 +1925,48 @@ function intelShip(t){
   html+=sect('Position')+kv([['LATITUDE',v.lat.toFixed(4)+'°'],['LONGITUDE',v.lon.toFixed(4)+'°']]);
   html+='<div class="why"><b>Why you\'re seeing this</b>A live AIS transponder broadcast, relayed by AISStream through your ThirdEye backend. AIS is a direct signal — but it can be switched off or spoofed, so absence isn\'t proof of absence. Only vessels in your current view are shown (panning fetches more).</div>';
   html+='<div class="srcline">Source: AISStream (live AIS) · via ThirdEye backend</div>';
+  $('#intelBody').innerHTML=html;
+}
+
+/* ---- civil aircraft (OpenSky, via backend) — shares the stream above ---- */
+function renderCivAir(list){
+  DS.civair.entities.removeAll();
+  var n=0;
+  list.forEach(function(a){
+    if(!isFinite(a.lat)||!isFinite(a.lon)) return;
+    var emg=(a.squawk==='7500'||a.squawk==='7600'||a.squawk==='7700');
+    var col=emg?'#FF5964':'#8FD0E6';
+    var altM=(a.alt!=null?a.alt:0);
+    var e=DS.civair.entities.add({
+      position:Cesium.Cartesian3.fromDegrees(a.lon, a.lat, a.onGround?200:Math.max(200,altM)),
+      billboard:{ image:emg?ICO.airHot:ICO.civ, width:16, height:16,
+        rotation:Cesium.Math.toRadians(-(a.track||0)), alignedAxis:Cesium.Cartesian3.ZERO,
+        color:Cesium.Color.WHITE, disableDepthTestDistance:0 },
+      properties:{ te_layer:'civair', te:{ a:a, emg:emg } }
+    });
+    e._baseColor=col; e._anchored=true; n++;
+  });
+  LAYERS.civair.count=n; LAYERS.civair.status='live';
+  refreshHealth(); renderLayers();
+}
+function intelCivAir(t){
+  var a=t.a; $('#intelType').textContent='AIR · CIVIL TRACK'+(t.emg?' · EMERGENCY':'');
+  var age=a.ts?((Date.now()-a.ts)/1000):null;
+  var altft=a.alt!=null?Math.round(a.alt*3.28084):null;
+  var html='<h2>'+esc((a.callsign||'').trim()||a.icao24||'UNKNOWN')+'</h2><div class="subttl">'+esc(a.icao24||'')+(a.country?(' · '+esc(a.country)):'')+'</div>';
+  html+='<div class="badges">'+badgeC('#39C6E6','DIRECT OBSERVATION · ADS-B (airplanes.live)')+
+        (age!=null?freshBadge(age<120?'live':'stale','SEEN '+fmtAge(age)+' AGO'):'')+
+        (t.emg?badgeC('#FF5964','SQUAWK '+a.squawk):'')+'</div>';
+  html+=sect('Track')+kv([
+    ['CALLSIGN', (a.callsign||'').trim()],
+    ['ALTITUDE', a.onGround?'GROUND':(altft!=null?altft.toLocaleString()+' ft':'—')],
+    ['GROUND SPD', a.vel!=null?Math.round(a.vel)+' kt':'—'],
+    ['TRACK', a.track!=null?Math.round(a.track)+'°':'—'],
+    ['VERT RATE', a.vrate!=null?Math.round(a.vrate*196.85)+' fpm':'—'],
+    ['SQUAWK', a.squawk||'—', t.emg?'hot':'']]);
+  html+=sect('Position')+kv([['LATITUDE',a.lat.toFixed(4)+'°'],['LONGITUDE',a.lon.toFixed(4)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>A civilian ADS-B track from the airplanes.live community network, relayed through your ThirdEye backend — which polls once and fans out to every viewer. Coverage has gaps where there are no receivers; only aircraft in your current view are shown, within the area the backend watches.</div>';
+  html+='<div class="srcline">Source: airplanes.live (ADS-B) · via ThirdEye backend</div>';
   $('#intelBody').innerHTML=html;
 }
 
@@ -2018,9 +2082,9 @@ function setSim(on){
    Layer manager UI (generated from the registry)
    ===================================================================== */
 function statusText(l){
-  if(l.id==='ships'){
+  if(l.id==='ships'||l.id==='civair'){
     if(l.status==='unavailable') return BACKEND?'backend unreachable':'needs backend';
-    if(l.status==='degraded') return 'stream dropped · retrying';
+    if(l.status==='degraded') return l.id==='civair'?'no data · retrying':'stream dropped · retrying';
     if(l.status==='loading') return 'connecting…';
   }
   return ({idle:'idle',loading:'acquiring…',live:'live',degraded:'degraded · stale TLE',
@@ -2077,7 +2141,7 @@ function applyVisibility(){
     var l=LAYERS[k], show=l.on && !(soloLayer&&soloLayer!==l.id);
     if(show && LAZY[k] && !lazyLoaded[k]){ lazyLoaded[k]=true; LAZY[k](); } // fetch on first reveal
     if(k==='radar'){ if(radarLayer) radarLayer.show=show; return; } // raster overlay, not a datasource
-    if(k==='ships'){ if(DS.ships) DS.ships.show=show; if(show) connectShips(); else disconnectShips(); return; } // live socket
+    if(k==='ships'||k==='civair'){ if(DS[k]) DS[k].show=show; streamEnsure(); return; } // shared live socket
     if(DS[k]) DS[k].show=show;
   });
 }
@@ -2149,6 +2213,7 @@ function selectEntity(e){
   else if(layer==='cables'){ intelCables(te); }
   else if(layer==='metar'){ intelMETAR(te); }
   else if(layer==='ships'){ intelShip(te); }
+  else if(layer==='civair'){ intelCivAir(te); }
   else if(layer==='hazard'){ intelHazard(te); }
   else if(layer==='launch'){ intelLaunch(te); }
   else if(layer==='aurora'){ intelAurora(te); }
@@ -2278,8 +2343,8 @@ function setupHUD(){
   handler.setInputAction(function(){ if(toolMode==='ruler'&&draft) finishDraft(false); },Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
 
   camera.changed.addEventListener(updateCamHUD);
-  camera.changed.addEventListener(function(){                 // tell the backend our new viewport (ships)
-    if(LAYERS.ships.on){ clearTimeout(shipViewportTimer); shipViewportTimer=setTimeout(sendShipViewport,600); }
+  camera.changed.addEventListener(function(){                 // tell the backend our new viewport (ships + civil air)
+    if(LAYERS.ships.on||LAYERS.civair.on){ clearTimeout(streamViewportTimer); streamViewportTimer=setTimeout(sendStreamViewport,600); }
   });
   camera.percentageChanged=0.02;
   updateCamHUD();
@@ -2697,7 +2762,8 @@ var LEGEND_SYMBOLS=[
   ['Glow dot','#FFB454','Fireball / bolide (size = energy)'],
   ['Filled hex cell','#F2A900','GPS-interference zone (H3)'],
   ['Line','#39C6E6','Submarine cable + landing points'],
-  ['Boat','#37E0A0','Ship (live AIS), rotated to heading — colour by type']
+  ['Boat','#37E0A0','Ship (live AIS), rotated to heading — colour by type'],
+  ['Chevron (cyan)','#8FD0E6','Civil aircraft (live ADS-B via airplanes.live)']
 ];
 function lgSw(c){ return '<span class="lgd-sw" style="background:'+c+'"></span>'; }
 function legendHTML(){
