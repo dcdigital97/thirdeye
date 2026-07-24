@@ -253,6 +253,14 @@ body.reticle-on #reticle{opacity:.5}
   border-radius:3px;padding:5px 8px;background:var(--panel)}
 #bl button.on{color:var(--accent);border-color:rgba(242,169,0,.45)}
 #bl button:hover{color:var(--txt)}
+/* satellite-imagery date/sensor stepper (sits just above the basemap row) */
+#imgctl{position:fixed;left:12px;bottom:76px;z-index:15;display:none;align-items:center;gap:5px;
+  background:rgba(8,14,20,.72);border:1px solid var(--line);border-radius:4px;padding:4px 6px}
+#imgctl.on{display:flex}
+#imgctl select,#imgctl button{font-family:var(--mono);font-size:9.5px;letter-spacing:.05em;color:var(--txt);
+  background:rgba(20,28,38,.85);border:1px solid var(--line);border-radius:3px;padding:2px 5px;cursor:pointer}
+#imgctl #imgDateLbl{color:var(--accent);min-width:76px;text-align:center;letter-spacing:.04em;font-family:var(--mono);font-size:9.5px}
+#imgctl button:hover{color:var(--accent)}
 
 /* ---------------- theme label + sim banner ---------------- */
 #themeLabel{position:fixed;top:52px;left:50%;transform:translateX(-50%);z-index:18;
@@ -438,7 +446,21 @@ body.tool-active #cesiumContainer canvas{cursor:crosshair}
     <button data-base="blue" class="on">Blue Marble</button>
     <button data-base="sat">Satellite</button>
     <button data-base="night">Night Lights</button>
+    <button data-base="truecolor">Live imagery</button>
     <button data-base="osm">Streets</button>
+  </div>
+  <!-- satellite-imagery date + sensor stepper (shown when 'Live imagery' basemap is active) -->
+  <div id="imgctl">
+    <select id="imgSensor" title="Imagery source / overpass">
+      <option value="MODIS_Terra_CorrectedReflectance_TrueColor">MODIS Terra</option>
+      <option value="MODIS_Aqua_CorrectedReflectance_TrueColor">MODIS Aqua</option>
+      <option value="VIIRS_SNPP_CorrectedReflectance_TrueColor">VIIRS SNPP</option>
+      <option value="VIIRS_NOAA20_CorrectedReflectance_TrueColor">VIIRS NOAA-20</option>
+    </select>
+    <button id="imgPrev" title="Previous day">◀</button>
+    <span id="imgDateLbl">—</span>
+    <button id="imgNext" title="Next day">▶</button>
+    <button id="imgLatest" title="Most recent complete day">latest</button>
   </div>
 
   <!-- measurement / geofence tools -->
@@ -525,6 +547,9 @@ var FEEDS = {
    (3) a LayerSpec. This object is the in-app source registry; docs/sources.md carries
    the same facts in prose. Every LAYER points at a SOURCES key via its `srcKey`. */
 var SOURCES = {
+  firms:         { name:'NASA FIRMS active fire (VIIRS/MODIS)', org:'NASA LANCE / EOSDIS', url:'https://firms.modaps.eosdis.nasa.gov',
+                   licence:'NASA open data; attribution', rate:'NRT; polled server-side ~15m', auth:'server-held MAP_KEY (never client-side)',
+                   cors:'via ThirdEye backend /api/fires', evidence:'OBSERVED (thermal-anomaly detection, not a confirmed fire)' },
   celestrak:     { name:'CelesTrak GP (TLE)', org:'CelesTrak / Dr T.S. Kelso', url:'https://celestrak.org',
                    licence:'Free reuse, attribution requested', rate:'Be gentle; cache ≥2h per group', auth:'none',
                    cors:'no CORS headers → proxied when hosted', evidence:'MODEL OUTPUT (SGP4 propagation)' },
@@ -797,7 +822,11 @@ var LAYERS = {
   civair:{ id:'civair', group:'AIR', name:'Civil aircraft', sym:'▲', color:'#8FD0E6',
            on:false, opacity:1, count:0, status:'idle', srcKey:'adsbciv', type:'stream',
            evidence:'DIRECT OBSERVATION', source:'airplanes.live · ADS-B via ThirdEye backend',
-           attr:'airplanes.live (ADS-B)' }
+           attr:'airplanes.live (ADS-B)' },
+  fires: { id:'fires', group:'ENVIRONMENT', name:'Active fires', sym:'✹', color:'#FF3B2F',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'firms',
+           evidence:'OBSERVED', source:'NASA FIRMS · VIIRS/MODIS thermal anomalies (via backend)',
+           attr:'NASA FIRMS (LANCE/EOSDIS)' }
 };
 // link existing layers to their source-registry entries
 LAYERS.sat.srcKey='celestrak'; LAYERS.quake.srcKey='usgs_quakes';
@@ -857,6 +886,21 @@ function gibsProvider(layerId){
     credit:new Cesium.Credit('NASA EOSDIS GIBS')
   });
 }
+/* Dated GIBS true-colour imagery (daily global mosaic; EPSG:4326, no token, CORS-open).
+   Lets the user see the most recent satellite pass and step back day-by-day / swap sensor.
+   Terra ~10:30, Aqua ~13:30, VIIRS ~13:30 local overpass — up to four looks at each day. */
+function gibsYesterday(){ return new Date(Date.now()-86400000).toISOString().slice(0,10); }
+var imgSensor='MODIS_Terra_CorrectedReflectance_TrueColor';
+var imgDate=gibsYesterday();
+function gibsDated(layerId, date){
+  return new Cesium.WebMapTileServiceImageryProvider({
+    url:'https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/'+layerId+'/default/'+date+'/250m/{TileMatrix}/{TileRow}/{TileCol}.jpeg',
+    layer:layerId, style:'default', format:'image/jpeg', tileMatrixSetID:'250m',
+    maximumLevel:8, tileWidth:512, tileHeight:512,
+    tilingScheme:new Cesium.GeographicTilingScheme(),
+    credit:new Cesium.Credit('NASA EOSDIS GIBS')
+  });
+}
 var BASEMAPS={
   sat:{ label:'Satellite', make:function(){ return new Cesium.UrlTemplateImageryProvider({
           url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -865,7 +909,8 @@ var BASEMAPS={
   night:{ label:'Night Lights', make:function(){ return gibsProvider('VIIRS_CityLights_2012'); }, b:1.0, c:1.05, s:0.95 },
   osm:{ label:'Streets', make:function(){ return new Cesium.UrlTemplateImageryProvider({
            url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maximumLevel:19,
-           credit:new Cesium.Credit('© OpenStreetMap contributors') }); }, b:0.75, c:1.0, s:0.65 }
+           credit:new Cesium.Credit('© OpenStreetMap contributors') }); }, b:0.75, c:1.0, s:0.65 },
+  truecolor:{ label:'Live imagery', make:function(){ return gibsDated(imgSensor, imgDate); }, b:1.0, c:1.05, s:1.0 }
 };
 function makeBaseLayer(key){
   var spec=BASEMAPS[key], lyr=new Cesium.ImageryLayer(spec.make());
@@ -930,6 +975,7 @@ function initViewer(){
   DS.cables=new Cesium.CustomDataSource('cables'); DS.cables.show=false;
   DS.ships=new Cesium.CustomDataSource('ships'); DS.ships.show=false;
   DS.civair=new Cesium.CustomDataSource('civair'); DS.civair.show=false;
+  DS.fires=new Cesium.CustomDataSource('fires'); DS.fires.show=false;
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
   viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch); viewer.dataSources.add(DS.aurora);
   viewer.dataSources.add(DS.cyclone); viewer.dataSources.add(DS.gdacs);
@@ -937,6 +983,7 @@ function initViewer(){
   viewer.dataSources.add(DS.starlink); viewer.dataSources.add(DS.gnss); viewer.dataSources.add(DS.geo);
   viewer.dataSources.add(DS.metar); viewer.dataSources.add(DS.cables);
   viewer.dataSources.add(DS.ships); viewer.dataSources.add(DS.civair);
+  viewer.dataSources.add(DS.fires);
   // tool overlays (measurements, geofences, geofence highlights) — always on top of layers
   measureDS=new Cesium.CustomDataSource('measure'); geofenceDS=new Cesium.CustomDataSource('geofence'); gfHLDS=new Cesium.CustomDataSource('gfhl');
   viewer.dataSources.add(measureDS); viewer.dataSources.add(geofenceDS); viewer.dataSources.add(gfHLDS);
@@ -950,6 +997,7 @@ function setBasemap(key, silent){
   var old=baseLayer; baseLayer=np; attachImageryFallback(np);
   setTimeout(function(){ try{ if(old) viewer.imageryLayers.remove(old,true); }catch(e){} },500);
   $$('#bl button').forEach(function(b){ b.classList.toggle('on', b.dataset.base===key); });
+  var ic=$('#imgctl'); if(ic) ic.classList.toggle('on', key==='truecolor'); // show imagery stepper only for Live imagery
 }
 
 /* =====================================================================
@@ -2126,14 +2174,14 @@ function renderLayers(){
   // persistent source attribution (licensing — brief §12)
   var foot=el('div'); foot.style.cssText='padding:9px 11px;border-top:1px solid var(--line);margin-top:4px;'+
     'font-size:9px;color:var(--txt-mute);line-height:1.7;font-family:var(--mono);letter-spacing:.04em';
-  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC · NOAA NHC · GDACS<br>RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange) · TeleGeography · NOAA AWC · AISStream';
+  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC · NOAA NHC · GDACS<br>RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange) · TeleGeography · NOAA AWC · AISStream · NASA FIRMS';
   body.appendChild(foot);
   if(leftTab!=='events') $('#layChip').textContent=active+' ACTIVE';
 }
 /* lazy loaders: heavy/optional layers fetch only on first enable (any path) */
 var LAZY = {
   starlink:function(){ loadConstellation('starlink'); }, gnss:function(){ loadConstellation('gnss'); },
-  geo:function(){ loadConstellation('geo'); }, metar:loadMETAR, cables:loadCables
+  geo:function(){ loadConstellation('geo'); }, metar:loadMETAR, cables:loadCables, fires:loadFires
 };
 var lazyLoaded = {};
 function applyVisibility(){
@@ -2186,6 +2234,60 @@ function clearSelection(){
   if(airTrailEntity){ try{DS.air.entities.remove(airTrailEntity);}catch(e){} airTrailEntity=null; }
   $('#intel').classList.remove('show');
 }
+/* =====================================================================
+   LAYER: active fires (NASA FIRMS — VIIRS/MODIS thermal anomalies via backend)
+   Server holds the MAP_KEY and polls FIRMS; the frontend just reads /api/fires.
+   A thermal-anomaly DETECTION, not a confirmed fire — labelled as such.
+   ===================================================================== */
+function fireColor(conf){ return conf==='high'?'#FF3B2F':(conf==='nominal'?'#FF7A1A':'#F2C200'); }
+function loadFires(){
+  LAYERS.fires.status='loading'; refreshHealth();
+  fetch(BACKEND+'/api/fires').then(function(r){return r.json();}).then(function(d){
+    if(!DS.fires) return;
+    DS.fires.entities.removeAll();
+    var list=(d&&d.fires)||[];
+    list.forEach(function(f){
+      if(!isFinite(f.lat)||!isFinite(f.lon)) return;
+      var col=fireColor(f.conf), frp=f.frp||0;
+      var size=Math.max(4, Math.min(15, 4+Math.sqrt(frp)*1.1)); // FRP → size (sqrt tames the huge ones)
+      var e=DS.fires.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(f.lon,f.lat),
+        point:{ pixelSize:size, color:Cesium.Color.fromCssColorString(col).withAlpha(0.9),
+          outlineColor:Cesium.Color.fromCssColorString(col).withAlpha(0.35), outlineWidth:1,
+          disableDepthTestDistance:Number.POSITIVE_INFINITY },
+        properties:{ te_layer:'fires', te:{ f:f, col:col } }
+      });
+      e._baseColor=col;
+    });
+    LAYERS.fires.count=DS.fires.entities.values.length;
+    LAYERS.fires.status=(d&&d.ok===false)?'unavailable':'live';
+    LAYERS.fires._updated=(d&&d.updated)||0;
+    refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.fires.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelFires(t){
+  var f=t.f;
+  $('#intelType').textContent='ENVIRONMENT · ACTIVE FIRE';
+  var age=(Date.now()-(f.ts||Date.now()))/1000;
+  var confTxt=(f.conf||'—').toUpperCase();
+  var html='<h2>'+(f.frp!=null?f.frp.toFixed(1)+' MW':'Thermal anomaly')+'</h2>';
+  html+='<div class="subttl">'+(f.sat?esc(f.sat)+' · ':'')+esc(f.instrument||'FIRMS')+'</div>';
+  html+='<div class="badges">'+freshBadge('report','OBSERVED · NASA FIRMS')+
+        freshBadge(age<6*3600?'live':'stale','DETECTED '+fmtAge(age)+' AGO')+
+        freshBadge(f.conf==='high'?'alert':'model','CONF '+confTxt)+'</div>';
+  html+=sect('Detection')+kv([
+    ['FIRE POWER', f.frp!=null?f.frp.toFixed(1)+' MW':'—', (f.frp!=null&&f.frp>=100)?'hot':''],
+    ['CONFIDENCE', confTxt],
+    ['BRIGHTNESS', f.bright!=null?f.bright.toFixed(1)+' K':'—'],
+    ['SATELLITE', f.sat||'—'],['INSTRUMENT', f.instrument||'—'],
+    ['PASS', f.dn==='D'?'Day':(f.dn==='N'?'Night':'—')],
+    ['LATITUDE', f.lat.toFixed(3)+'°'],['LONGITUDE', f.lon.toFixed(3)+'°'],
+    ['TIME', new Date(f.ts).toISOString().replace('T',' ').replace(/\..+/,'Z')]]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>A satellite <b style="display:inline">thermal-anomaly detection</b> from NASA FIRMS — the sensor measured heat here. Usually a fire, but it can also be gas flaring, industry or a very hot surface. It is a detection, <b style="display:inline">not</b> a confirmed fire. Near-real-time latency is ~1.5–3h and polar-orbit gaps mean brief or cool fires between passes are missed.</div>';
+  html+='<div class="srcline">Source: NASA FIRMS (VIIRS/MODIS) via ThirdEye backend</div>';
+  $('#intelBody').innerHTML=html;
+}
+
 function selectEntity(e){
   clearSelection(); selectedEntity=e;
   var layer=e.properties.te_layer.getValue(), te=e.properties.te.getValue();
@@ -2210,6 +2312,7 @@ function selectEntity(e){
   }
   if(layer==='sat'||layer==='starlink'||layer==='gnss'||layer==='geo'){ intelSat(te); }
   else if(layer==='quake'){ intelQuake(te); }
+  else if(layer==='fires'){ intelFires(te); }
   else if(layer==='cables'){ intelCables(te); }
   else if(layer==='metar'){ intelMETAR(te); }
   else if(layer==='ships'){ intelShip(te); }
@@ -2474,6 +2577,24 @@ function wireUI(){
   $$('#vm button[data-mode]').forEach(function(b){ b.onclick=function(){
     if(b.dataset.mode==='reticle') setReticle(!reticleOn); else setMode(b.dataset.mode); }; });
   $$('#bl button').forEach(function(b){ b.onclick=function(){ setBasemap(b.dataset.base); }; });
+  // satellite-imagery stepper: swap sensor / step the day; rebuild the basemap live when active
+  (function(){
+    var lbl=$('#imgDateLbl'), sel=$('#imgSensor');
+    function refresh(){ if(lbl) lbl.textContent=imgDate; if(sel) sel.value=imgSensor; }
+    function rebuild(){ refresh(); if(currentBase==='truecolor') setBasemap('truecolor', true); }
+    function step(days){
+      var d=new Date(imgDate+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+days);
+      var ns=d.toISOString().slice(0,10), max=gibsYesterday();
+      if(ns>max) ns=max;                 // never past the latest complete global day
+      imgDate=ns; rebuild();
+    }
+    if(sel) sel.onchange=function(){ imgSensor=sel.value; rebuild(); };
+    var p=$('#imgPrev'), n=$('#imgNext'), l=$('#imgLatest');
+    if(p) p.onclick=function(){ step(-1); };
+    if(n) n.onclick=function(){ step(1); };
+    if(l) l.onclick=function(){ imgDate=gibsYesterday(); rebuild(); };
+    refresh();
+  })();
   $('#godBtn').onclick=function(){ setGodMode(!GODMODE); };
   $$('#ws button').forEach(function(b){ b.onclick=function(){ setWorkspace(b.dataset.ws); }; });
   $('#north').onclick=function(){ camera.flyTo({destination:camera.positionWC,orientation:{heading:0,pitch:camera.pitch,roll:0},duration:0.6}); };
@@ -2725,7 +2846,7 @@ function anchorEntities(ds, lift){
     }
   }
 }
-var ANCHOR_LAYERS=['quake','hazard','cyclone','floods','launch','aurora','fireball','metar','cables'];
+var ANCHOR_LAYERS=['quake','hazard','cyclone','floods','launch','aurora','fireball','metar','cables','fires'];
 function anchorAllData(){ if(!viewer) return; ANCHOR_LAYERS.forEach(function(k){ anchorEntities(DS[k],8000); }); }
 
 /* =====================================================================
@@ -2747,6 +2868,7 @@ var LEGEND_SCALES=[
   ['GPS interference',[['Medium 2–10%','#F2A900'],['High ≥10%','#FF5964']]],
   ['UK flood severity',[['Alert','#F2A900'],['Warning','#FF7A1A'],['Severe','#FF5964']]],
   ['Cyclone strength',[['Storm','#F2A900'],['Cat 1–2','#FF7A1A'],['Cat 3+','#FF5964']]],
+  ['Active fire confidence',[['Low','#F2C200'],['Nominal','#FF7A1A'],['High','#FF3B2F']]],
   ['Ship type (AIS)',[['Cargo','#37E0A0'],['Tanker','#FF7A1A'],['Passenger','#39C6E6'],['Fishing','#5B8CFF'],['Military','#FF5964']]]
 ];
 var LEGEND_SYMBOLS=[
@@ -2843,6 +2965,7 @@ loadCesium().then(function(){
   setInterval(loadFireballs,1800000);                              // CNEOS fireballs sporadic → poll every 30m
   setInterval(loadGPSJam,21600000);                                // GPSJam is a daily file → refresh every 6h
   setInterval(function(){ if(lazyLoaded.metar) loadMETAR(); },600000); // METAR hourly → refresh every 10m when shown
+  setInterval(function(){ if(lazyLoaded.fires && LAYERS.fires.on) loadFires(); },300000); // FIRMS NRT → refresh every 5m when shown
   setInterval(checkGeofences,5000);                                // re-check watch zones every 5s
   setInterval(function(){ if(leftTab==='events') renderEvents(); },5000); // keep the events list fresh
   setInterval(anchorAllData,1500);                                 // occlude new markers behind the globe
