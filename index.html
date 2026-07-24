@@ -550,6 +550,15 @@ var SOURCES = {
   firms:         { name:'NASA FIRMS active fire (VIIRS/MODIS)', org:'NASA LANCE / EOSDIS', url:'https://firms.modaps.eosdis.nasa.gov',
                    licence:'NASA open data; attribution', rate:'NRT; polled server-side ~15m', auth:'server-held MAP_KEY (never client-side)',
                    cors:'via ThirdEye backend /api/fires', evidence:'OBSERVED (thermal-anomaly detection, not a confirmed fire)' },
+  ourairports:   { name:'OurAirports (airports.csv)', org:'OurAirports / David Megginson', url:'https://ourairports.com/data/',
+                   licence:'Public domain', rate:'Static; fetched once on enable', auth:'none',
+                   cors:'GitHub Pages CORS → direct', evidence:'REFERENCE (airport locations)' },
+  wri_gppd:      { name:'Global Power Plant Database', org:'World Resources Institute', url:'https://github.com/wri/global-power-plant-database',
+                   licence:'CC BY 4.0', rate:'Static; fetched once on enable', auth:'none',
+                   cors:'raw.githubusercontent CORS → direct', evidence:'REFERENCE (plant location / fuel / capacity)' },
+  ne_ports:      { name:'Natural Earth ports', org:'Natural Earth', url:'https://www.naturalearthdata.com',
+                   licence:'Public domain', rate:'Static; fetched once on enable', auth:'none',
+                   cors:'raw.githubusercontent CORS → direct', evidence:'REFERENCE (major ports)' },
   celestrak:     { name:'CelesTrak GP (TLE)', org:'CelesTrak / Dr T.S. Kelso', url:'https://celestrak.org',
                    licence:'Free reuse, attribution requested', rate:'Be gentle; cache ≥2h per group', auth:'none',
                    cors:'no CORS headers → proxied when hosted', evidence:'MODEL OUTPUT (SGP4 propagation)' },
@@ -826,7 +835,16 @@ var LAYERS = {
   fires: { id:'fires', group:'ENVIRONMENT', name:'Active fires', sym:'✹', color:'#FF3B2F',
            on:false, opacity:1, count:0, status:'idle', srcKey:'firms',
            evidence:'OBSERVED', source:'NASA FIRMS · VIIRS/MODIS thermal anomalies (via backend)',
-           attr:'NASA FIRMS (LANCE/EOSDIS)' }
+           attr:'NASA FIRMS (LANCE/EOSDIS)' },
+  airports:{ id:'airports', group:'INFRASTRUCTURE', name:'Airports', sym:'✈', color:'#39C6E6',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'ourairports',
+           evidence:'REFERENCE', source:'OurAirports · large + medium airports', attr:'OurAirports (public domain)' },
+  power: { id:'power', group:'INFRASTRUCTURE', name:'Power stations', sym:'⚡', color:'#F2A900',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'wri_gppd',
+           evidence:'REFERENCE', source:'WRI Global Power Plant DB · top 4,000 by capacity', attr:'WRI GPPD (CC BY 4.0)' },
+  ports: { id:'ports', group:'INFRASTRUCTURE', name:'Ports', sym:'⚓', color:'#37E0A0',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'ne_ports',
+           evidence:'REFERENCE', source:'Natural Earth · major world ports', attr:'Natural Earth (public domain)' }
 };
 // link existing layers to their source-registry entries
 LAYERS.sat.srcKey='celestrak'; LAYERS.quake.srcKey='usgs_quakes';
@@ -976,6 +994,9 @@ function initViewer(){
   DS.ships=new Cesium.CustomDataSource('ships'); DS.ships.show=false;
   DS.civair=new Cesium.CustomDataSource('civair'); DS.civair.show=false;
   DS.fires=new Cesium.CustomDataSource('fires'); DS.fires.show=false;
+  DS.airports=new Cesium.CustomDataSource('airports'); DS.airports.show=false;
+  DS.power=new Cesium.CustomDataSource('power'); DS.power.show=false;
+  DS.ports=new Cesium.CustomDataSource('ports'); DS.ports.show=false;
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
   viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch); viewer.dataSources.add(DS.aurora);
   viewer.dataSources.add(DS.cyclone); viewer.dataSources.add(DS.gdacs);
@@ -984,6 +1005,7 @@ function initViewer(){
   viewer.dataSources.add(DS.metar); viewer.dataSources.add(DS.cables);
   viewer.dataSources.add(DS.ships); viewer.dataSources.add(DS.civair);
   viewer.dataSources.add(DS.fires);
+  viewer.dataSources.add(DS.airports); viewer.dataSources.add(DS.power); viewer.dataSources.add(DS.ports);
   // tool overlays (measurements, geofences, geofence highlights) — always on top of layers
   measureDS=new Cesium.CustomDataSource('measure'); geofenceDS=new Cesium.CustomDataSource('geofence'); gfHLDS=new Cesium.CustomDataSource('gfhl');
   viewer.dataSources.add(measureDS); viewer.dataSources.add(geofenceDS); viewer.dataSources.add(gfHLDS);
@@ -2174,14 +2196,15 @@ function renderLayers(){
   // persistent source attribution (licensing — brief §12)
   var foot=el('div'); foot.style.cssText='padding:9px 11px;border-top:1px solid var(--line);margin-top:4px;'+
     'font-size:9px;color:var(--txt-mute);line-height:1.7;font-family:var(--mono);letter-spacing:.04em';
-  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC · NOAA NHC · GDACS<br>RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange) · TeleGeography · NOAA AWC · AISStream · NASA FIRMS';
+  foot.innerHTML='SOURCES<br>NASA GIBS · USGS · airplanes.live · CelesTrak · NASA EONET · Space Devs · NOAA SWPC · NOAA NHC · GDACS<br>RainViewer · UK Env Agency · NASA JPL CNEOS · GPSJam (adsbexchange) · TeleGeography · NOAA AWC · AISStream · NASA FIRMS · OurAirports · WRI GPPD · Natural Earth';
   body.appendChild(foot);
   if(leftTab!=='events') $('#layChip').textContent=active+' ACTIVE';
 }
 /* lazy loaders: heavy/optional layers fetch only on first enable (any path) */
 var LAZY = {
   starlink:function(){ loadConstellation('starlink'); }, gnss:function(){ loadConstellation('gnss'); },
-  geo:function(){ loadConstellation('geo'); }, metar:loadMETAR, cables:loadCables, fires:loadFires
+  geo:function(){ loadConstellation('geo'); }, metar:loadMETAR, cables:loadCables, fires:loadFires,
+  airports:loadAirports, power:loadPower, ports:loadPorts
 };
 var lazyLoaded = {};
 function applyVisibility(){
@@ -2288,6 +2311,115 @@ function intelFires(t){
   $('#intelBody').innerHTML=html;
 }
 
+/* =====================================================================
+   LAYERS: infrastructure overlays (reference geometry, key-free, CORS-open)
+   Airports (OurAirports) · Power stations (WRI GPPD) · Ports (Natural Earth).
+   All lazy-loaded once on first enable; REFERENCE = where it is, not a live feed.
+   Points are placed at height with depth-test on, so they occlude behind the globe.
+   ===================================================================== */
+function parseCSVLine(line){ // handles double-quoted fields containing commas
+  var out=[], cur='', q=false;
+  for(var i=0;i<line.length;i++){ var ch=line[i];
+    if(q){ if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else q=false; } else cur+=ch; }
+    else { if(ch===','){ out.push(cur); cur=''; } else if(ch==='"') q=true; else cur+=ch; } }
+  out.push(cur); return out;
+}
+function loadAirports(){
+  LAYERS.airports.status='loading'; refreshHealth();
+  fetch('https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv').then(function(r){return r.text();}).then(function(txt){
+    if(!DS.airports) return; DS.airports.entities.removeAll();
+    var lines=txt.split(/\r?\n/); if(lines.length<2) throw 0;
+    var H=parseCSVLine(lines[0]);
+    var iTy=H.indexOf('type'),iNm=H.indexOf('name'),iLat=H.indexOf('latitude_deg'),iLon=H.indexOf('longitude_deg'),
+        iCt=H.indexOf('iso_country'),iMu=H.indexOf('municipality'),iIa=H.indexOf('iata_code'),iId=H.indexOf('ident');
+    var n=0;
+    for(var r=1;r<lines.length && n<6000;r++){ if(!lines[r]) continue; var c=parseCSVLine(lines[r]);
+      var ty=c[iTy]; if(ty!=='large_airport'&&ty!=='medium_airport') continue;
+      var lat=parseFloat(c[iLat]),lon=parseFloat(c[iLon]); if(!isFinite(lat)||!isFinite(lon)) continue;
+      var big=ty==='large_airport', col=big?'#39C6E6':'#6FA8C0';
+      var e=DS.airports.entities.add({ position:Cesium.Cartesian3.fromDegrees(lon,lat,5000),
+        point:{ pixelSize:big?7:4.5, color:Cesium.Color.fromCssColorString(col).withAlpha(0.9),
+          outlineColor:Cesium.Color.fromCssColorString(col).withAlpha(0.35), outlineWidth:1, disableDepthTestDistance:0 },
+        properties:{ te_layer:'airports', te:{ name:c[iNm], iata:c[iIa], ident:c[iId], ctry:c[iCt], mun:c[iMu], ty:ty, lat:lat, lon:lon } } });
+      e._baseColor=col; n++;
+    }
+    LAYERS.airports.count=DS.airports.entities.values.length; LAYERS.airports._sampled=(n>=6000);
+    LAYERS.airports.status='live'; refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.airports.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+var FUELCOL={Coal:'#8A8F98',Gas:'#F2A900',Oil:'#C9722B',Nuclear:'#E06AFF',Hydro:'#39C6E6',Wind:'#37E0A0',
+  Solar:'#F2E14C',Biomass:'#9BCB5A',Waste:'#B08A5A',Geothermal:'#FF7A6B','Wave and Tidal':'#5B8CFF',
+  Petcoke:'#8A8F98',Cogeneration:'#C0C0C0',Storage:'#8FD0E6',Other:'#C9CDD4'};
+function fuelCol(f){ return FUELCOL[f]||'#C9CDD4'; }
+function loadPower(){
+  LAYERS.power.status='loading'; refreshHealth();
+  fetch('https://raw.githubusercontent.com/wri/global-power-plant-database/master/output_database/global_power_plant_database.csv').then(function(r){return r.text();}).then(function(txt){
+    if(!DS.power) return; DS.power.entities.removeAll();
+    var lines=txt.split(/\r?\n/); if(lines.length<2) throw 0;
+    var H=parseCSVLine(lines[0]);
+    var iNm=H.indexOf('name'),iCp=H.indexOf('capacity_mw'),iLat=H.indexOf('latitude'),iLon=H.indexOf('longitude'),
+        iFu=H.indexOf('primary_fuel'),iCt=H.indexOf('country_long'),iOw=H.indexOf('owner'),iYr=H.indexOf('commissioning_year');
+    var plants=[];
+    for(var r=1;r<lines.length;r++){ if(!lines[r]) continue; var c=parseCSVLine(lines[r]);
+      var lat=parseFloat(c[iLat]),lon=parseFloat(c[iLon]); if(!isFinite(lat)||!isFinite(lon)) continue;
+      plants.push({ name:c[iNm], cap:parseFloat(c[iCp])||0, lat:lat, lon:lon, fuel:c[iFu], ctry:c[iCt], own:c[iOw], yr:c[iYr] }); }
+    plants.sort(function(a,b){return b.cap-a.cap;});
+    var sampled=plants.length>4000; plants=plants.slice(0,4000);
+    plants.forEach(function(p){ var col=fuelCol(p.fuel), size=Math.max(3.5, Math.min(13, 3.5+Math.sqrt(p.cap)*0.28));
+      var e=DS.power.entities.add({ position:Cesium.Cartesian3.fromDegrees(p.lon,p.lat,5000),
+        point:{ pixelSize:size, color:Cesium.Color.fromCssColorString(col).withAlpha(0.88),
+          outlineColor:Cesium.Color.fromCssColorString(col).withAlpha(0.35), outlineWidth:1, disableDepthTestDistance:0 },
+        properties:{ te_layer:'power', te:p } });
+      e._baseColor=col; });
+    LAYERS.power.count=DS.power.entities.values.length; LAYERS.power._sampled=sampled;
+    LAYERS.power.status='live'; refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.power.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function loadPorts(){
+  LAYERS.ports.status='loading'; refreshHealth();
+  fetch('https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_ports.geojson').then(function(r){return r.json();}).then(function(gj){
+    if(!DS.ports) return; DS.ports.entities.removeAll();
+    (gj.features||[]).forEach(function(f){ var g=f.geometry; if(!g||g.type!=='Point') return; var c=g.coordinates, p=f.properties||{};
+      if(!isFinite(c[0])||!isFinite(c[1])) return; var col='#37E0A0';
+      var e=DS.ports.entities.add({ position:Cesium.Cartesian3.fromDegrees(c[0],c[1],5000),
+        point:{ pixelSize:5, color:Cesium.Color.fromCssColorString(col).withAlpha(0.9),
+          outlineColor:Cesium.Color.fromCssColorString(col).withAlpha(0.35), outlineWidth:1, disableDepthTestDistance:0 },
+        properties:{ te_layer:'ports', te:{ name:p.name, website:p.website, lat:c[1], lon:c[0] } } });
+      e._baseColor=col; });
+    LAYERS.ports.count=DS.ports.entities.values.length; LAYERS.ports.status='live'; refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.ports.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelAirport(t){
+  $('#intelType').textContent='INFRASTRUCTURE · AIRPORT';
+  var big=t.ty==='large_airport';
+  var html='<h2>'+esc(t.name||t.ident||'Airport')+'</h2><div class="subttl">'+esc((t.iata||t.ident||'')+(t.ctry?(' · '+t.ctry):''))+'</div>';
+  html+='<div class="badges">'+freshBadge('model','REFERENCE · OurAirports')+freshBadge(big?'live':'report',big?'LARGE':'MEDIUM')+'</div>';
+  html+=sect('Facility')+kv([['NAME',t.name],['IATA',t.iata||'—'],['IDENT',t.ident||'—'],['TYPE',big?'Large airport':'Medium airport'],
+    ['CITY',t.mun||'—'],['COUNTRY',t.ctry||'—'],['LATITUDE',t.lat.toFixed(3)+'°'],['LONGITUDE',t.lon.toFixed(3)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>Reference geometry from OurAirports (open data) — where the airport <b style="display:inline">is</b>, not a live status feed. Filtered to large and medium airports worldwide.</div>';
+  html+='<div class="srcline">Source: OurAirports (public domain)</div>';
+  $('#intelBody').innerHTML=html;
+}
+function intelPower(t){
+  $('#intelType').textContent='INFRASTRUCTURE · POWER STATION';
+  var html='<h2>'+esc(t.name||'Power station')+'</h2><div class="subttl">'+esc((t.fuel||'—')+(t.ctry?(' · '+t.ctry):''))+'</div>';
+  html+='<div class="badges">'+freshBadge('model','REFERENCE · WRI GPPD')+freshBadge('report',(t.cap?Math.round(t.cap)+' MW':'—'))+'</div>';
+  html+=sect('Plant')+kv([['NAME',t.name],['FUEL',t.fuel||'—'],['CAPACITY',t.cap?t.cap.toFixed(1)+' MW':'—','hot'],
+    ['OWNER',t.own||'—'],['COMMISSIONED',t.yr||'—'],['COUNTRY',t.ctry||'—'],['LATITUDE',t.lat.toFixed(3)+'°'],['LONGITUDE',t.lon.toFixed(3)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>Reference geometry from the WRI Global Power Plant Database (CC BY 4.0) — plant location, fuel and capacity, not live generation. Showing the largest ~4,000 by capacity worldwide.</div>';
+  html+='<div class="srcline">Source: WRI Global Power Plant Database</div>';
+  $('#intelBody').innerHTML=html;
+}
+function intelPort(t){
+  $('#intelType').textContent='INFRASTRUCTURE · PORT';
+  var html='<h2>'+esc(t.name||'Port')+'</h2><div class="subttl">Seaport / harbour</div>';
+  html+='<div class="badges">'+freshBadge('model','REFERENCE · Natural Earth')+'</div>';
+  html+=sect('Location')+kv([['NAME',t.name||'—'],['LATITUDE',t.lat.toFixed(3)+'°'],['LONGITUDE',t.lon.toFixed(3)+'°']]);
+  html+='<div class="why"><b>Why you\'re seeing this</b>Major world ports from Natural Earth (public domain) — reference geometry that complements the submarine-cable landing points. Not a live berth/vessel status.</div>';
+  html+='<div class="srcline">Source: Natural Earth (public domain)</div>';
+  $('#intelBody').innerHTML=html;
+}
+
 function selectEntity(e){
   clearSelection(); selectedEntity=e;
   var layer=e.properties.te_layer.getValue(), te=e.properties.te.getValue();
@@ -2313,6 +2445,9 @@ function selectEntity(e){
   if(layer==='sat'||layer==='starlink'||layer==='gnss'||layer==='geo'){ intelSat(te); }
   else if(layer==='quake'){ intelQuake(te); }
   else if(layer==='fires'){ intelFires(te); }
+  else if(layer==='airports'){ intelAirport(te); }
+  else if(layer==='power'){ intelPower(te); }
+  else if(layer==='ports'){ intelPort(te); }
   else if(layer==='cables'){ intelCables(te); }
   else if(layer==='metar'){ intelMETAR(te); }
   else if(layer==='ships'){ intelShip(te); }
@@ -2869,6 +3004,7 @@ var LEGEND_SCALES=[
   ['UK flood severity',[['Alert','#F2A900'],['Warning','#FF7A1A'],['Severe','#FF5964']]],
   ['Cyclone strength',[['Storm','#F2A900'],['Cat 1–2','#FF7A1A'],['Cat 3+','#FF5964']]],
   ['Active fire confidence',[['Low','#F2C200'],['Nominal','#FF7A1A'],['High','#FF3B2F']]],
+  ['Power-plant fuel',[['Coal','#8A8F98'],['Gas','#F2A900'],['Nuclear','#E06AFF'],['Hydro','#39C6E6'],['Wind','#37E0A0'],['Solar','#F2E14C']]],
   ['Ship type (AIS)',[['Cargo','#37E0A0'],['Tanker','#FF7A1A'],['Passenger','#39C6E6'],['Fishing','#5B8CFF'],['Military','#FF5964']]]
 ];
 var LEGEND_SYMBOLS=[
