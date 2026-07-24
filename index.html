@@ -559,6 +559,9 @@ var SOURCES = {
   ne_ports:      { name:'Natural Earth ports', org:'Natural Earth', url:'https://www.naturalearthdata.com',
                    licence:'Public domain', rate:'Static; fetched once on enable', auth:'none',
                    cors:'raw.githubusercontent CORS → direct', evidence:'REFERENCE (major ports)' },
+  tfl_jamcams:   { name:'TfL JamCams', org:'Transport for London', url:'https://api.tfl.gov.uk',
+                   licence:'TfL Open Data — attribution "Powered by TfL Open Data"', rate:'Images refresh ~5 min; locations static', auth:'none (optional free app key for higher limits)',
+                   cors:'CORS-enabled → direct', evidence:'DIRECT OBSERVATION (traffic camera snapshot)' },
   celestrak:     { name:'CelesTrak GP (TLE)', org:'CelesTrak / Dr T.S. Kelso', url:'https://celestrak.org',
                    licence:'Free reuse, attribution requested', rate:'Be gentle; cache ≥2h per group', auth:'none',
                    cors:'no CORS headers → proxied when hosted', evidence:'MODEL OUTPUT (SGP4 propagation)' },
@@ -844,12 +847,15 @@ var LAYERS = {
            evidence:'REFERENCE', source:'WRI Global Power Plant DB · top 4,000 by capacity', attr:'WRI GPPD (CC BY 4.0)' },
   ports: { id:'ports', group:'INFRASTRUCTURE', name:'Ports', sym:'⚓', color:'#37E0A0',
            on:false, opacity:1, count:0, status:'idle', srcKey:'ne_ports',
-           evidence:'REFERENCE', source:'Natural Earth · major world ports', attr:'Natural Earth (public domain)' }
+           evidence:'REFERENCE', source:'Natural Earth · major world ports', attr:'Natural Earth (public domain)' },
+  jamcams:{ id:'jamcams', group:'CAMERAS', name:'UK traffic cams (London)', sym:'◉', color:'#F2A900',
+           on:false, opacity:1, count:0, status:'idle', srcKey:'tfl_jamcams',
+           evidence:'DIRECT OBSERVATION', source:'TfL JamCams · London traffic cameras', attr:'Powered by TfL Open Data' }
 };
 // link existing layers to their source-registry entries
 LAYERS.sat.srcKey='celestrak'; LAYERS.quake.srcKey='usgs_quakes';
 LAYERS.air.srcKey='airplanes_live'; LAYERS.hazard.srcKey='eonet'; LAYERS.launch.srcKey='ll2';
-var GROUPS = ['SPACE','ENVIRONMENT','AIR','MARITIME','SIGNALS','INFRASTRUCTURE'];
+var GROUPS = ['SPACE','ENVIRONMENT','AIR','MARITIME','SIGNALS','INFRASTRUCTURE','CAMERAS'];
 var soloLayer = null;
 var GODMODE = false; // §3.5-E panoptic view: labels on aircraft (callsign+alt) and satellites (name)
 
@@ -997,6 +1003,7 @@ function initViewer(){
   DS.airports=new Cesium.CustomDataSource('airports'); DS.airports.show=false;
   DS.power=new Cesium.CustomDataSource('power'); DS.power.show=false;
   DS.ports=new Cesium.CustomDataSource('ports'); DS.ports.show=false;
+  DS.jamcams=new Cesium.CustomDataSource('jamcams'); DS.jamcams.show=false;
   viewer.dataSources.add(DS.sat); viewer.dataSources.add(DS.quake); viewer.dataSources.add(DS.air);
   viewer.dataSources.add(DS.hazard); viewer.dataSources.add(DS.launch); viewer.dataSources.add(DS.aurora);
   viewer.dataSources.add(DS.cyclone); viewer.dataSources.add(DS.gdacs);
@@ -1006,6 +1013,7 @@ function initViewer(){
   viewer.dataSources.add(DS.ships); viewer.dataSources.add(DS.civair);
   viewer.dataSources.add(DS.fires);
   viewer.dataSources.add(DS.airports); viewer.dataSources.add(DS.power); viewer.dataSources.add(DS.ports);
+  viewer.dataSources.add(DS.jamcams);
   // tool overlays (measurements, geofences, geofence highlights) — always on top of layers
   measureDS=new Cesium.CustomDataSource('measure'); geofenceDS=new Cesium.CustomDataSource('geofence'); gfHLDS=new Cesium.CustomDataSource('gfhl');
   viewer.dataSources.add(measureDS); viewer.dataSources.add(geofenceDS); viewer.dataSources.add(gfHLDS);
@@ -2204,7 +2212,7 @@ function renderLayers(){
 var LAZY = {
   starlink:function(){ loadConstellation('starlink'); }, gnss:function(){ loadConstellation('gnss'); },
   geo:function(){ loadConstellation('geo'); }, metar:loadMETAR, cables:loadCables, fires:loadFires,
-  airports:loadAirports, power:loadPower, ports:loadPorts
+  airports:loadAirports, power:loadPower, ports:loadPorts, jamcams:loadJamcams
 };
 var lazyLoaded = {};
 function applyVisibility(){
@@ -2420,6 +2428,43 @@ function intelPort(t){
   $('#intelBody').innerHTML=html;
 }
 
+/* =====================================================================
+   LAYER: UK traffic cameras — TfL JamCams (London). Key-free, CORS-open.
+   Camera LOCATIONS are static; each snapshot image refreshes ~every 5 min.
+   ===================================================================== */
+function loadJamcams(){
+  LAYERS.jamcams.status='loading'; refreshHealth();
+  fetch('https://api.tfl.gov.uk/Place/Type/JamCam').then(function(r){return r.json();}).then(function(arr){
+    if(!DS.jamcams) return; DS.jamcams.entities.removeAll();
+    (arr||[]).forEach(function(cam){
+      var lat=cam.lat, lon=cam.lon; if(!isFinite(lat)||!isFinite(lon)) return;
+      var ap=cam.additionalProperties||[], img=null, vid=null, avail=true;
+      ap.forEach(function(p){ if(p.key==='imageUrl') img=p.value; else if(p.key==='videoUrl') vid=p.value;
+        else if(p.key==='available') avail=(String(p.value)==='true'); });
+      var col=avail?'#F2A900':'#6B7480';
+      var e=DS.jamcams.entities.add({ position:Cesium.Cartesian3.fromDegrees(lon,lat,4000),
+        point:{ pixelSize:5.5, color:Cesium.Color.fromCssColorString(col).withAlpha(0.9),
+          outlineColor:Cesium.Color.fromCssColorString(col).withAlpha(0.35), outlineWidth:1, disableDepthTestDistance:0 },
+        properties:{ te_layer:'jamcams', te:{ name:cam.commonName, img:img, vid:vid, avail:avail, lat:lat, lon:lon } } });
+      e._baseColor=col;
+    });
+    LAYERS.jamcams.count=DS.jamcams.entities.values.length; LAYERS.jamcams.status='live'; refreshHealth(); renderLayers();
+  }).catch(function(){ LAYERS.jamcams.status='unavailable'; refreshHealth(); renderLayers(); });
+}
+function intelJamcam(t){
+  $('#intelType').textContent='CAMERAS · TRAFFIC (LONDON)';
+  var html='<h2>'+esc(t.name||'Traffic camera')+'</h2><div class="subttl">TfL JamCam · '+(t.avail?'online':'offline')+'</div>';
+  html+='<div class="badges">'+freshBadge(t.avail?'live':'stale','DIRECT · TfL JamCam')+freshBadge('report','SNAPSHOT ~5 min')+'</div>';
+  if(t.img){ var u=t.img+(t.img.indexOf('?')>=0?'&':'?')+'cb='+Date.now();
+    html+='<img src="'+esc(u)+'" alt="camera" style="width:100%;border-radius:5px;margin:8px 0;border:1px solid var(--line)" onerror="this.style.display=\'none\'">'; }
+  html+=sect('Camera')+kv([['NAME',t.name],['STATUS',t.avail?'Online':'Offline'],
+    ['LATITUDE',t.lat.toFixed(4)+'°'],['LONGITUDE',t.lon.toFixed(4)+'°']]);
+  if(t.vid) html+='<div class="srcline"><a href="'+esc(t.vid)+'" target="_blank" rel="noopener">▶ Short video clip ↗</a></div>';
+  html+='<div class="why"><b>Why you\'re seeing this</b>A live still from Transport for London\'s JamCam network — a real traffic camera, refreshed by TfL roughly every 5 minutes (a snapshot, not a continuous stream). London only.</div>';
+  html+='<div class="srcline">Source: TfL Unified API — Powered by TfL Open Data</div>';
+  $('#intelBody').innerHTML=html;
+}
+
 function selectEntity(e){
   clearSelection(); selectedEntity=e;
   var layer=e.properties.te_layer.getValue(), te=e.properties.te.getValue();
@@ -2448,6 +2493,7 @@ function selectEntity(e){
   else if(layer==='airports'){ intelAirport(te); }
   else if(layer==='power'){ intelPower(te); }
   else if(layer==='ports'){ intelPort(te); }
+  else if(layer==='jamcams'){ intelJamcam(te); }
   else if(layer==='cables'){ intelCables(te); }
   else if(layer==='metar'){ intelMETAR(te); }
   else if(layer==='ships'){ intelShip(te); }
